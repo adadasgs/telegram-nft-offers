@@ -31,7 +31,10 @@ TEXTS = {
         "accept": "Принять",
         "decline": "Отклонить",
         "accepted": "Продавец принял предложение по подарку {gift} на сумму {amount}⭐️.\n\nЭто подтверждение согласия продавца, а не резервирование или перевод Stars. Передавайте подарок только после самостоятельной проверки условий.",
-        "declined": "Продавец отклонил предложение по подарку {gift}.",
+        "declined": "❌ Продавец отклонил предложение по подарку {gift}.",
+        "transfer_link": "Передать подарок",
+        "confirm_transfer": "Подтвердить передачу",
+        "transfer_marked": "Отметка о передаче получена. Бот не проверяет фактическую передачу NFT или оплату. Проверьте их самостоятельно.",
         "buyer_accept": "Вы приняли предложение. Отправьте подарок покупателю только после проверки условий и получения оплаты самостоятельно. Автоматического удержания или перевода Stars этот бот не выполняет.",
         "buyer_decline": "Вы отклонили предложение.",
         "expired": "Это предложение уже обработано.",
@@ -43,7 +46,10 @@ TEXTS = {
         "accept": "Accept",
         "decline": "Decline",
         "accepted": "The seller accepted the offer for {gift} at {amount}⭐️.\n\nThis confirms the seller's acceptance only. It does not reserve or transfer Stars. Verify the terms and payment independently before transferring the gift.",
-        "declined": "The seller declined the offer for {gift}.",
+        "declined": "❌ The seller declined the offer for {gift}.",
+        "transfer_link": "Transfer the gift",
+        "confirm_transfer": "Confirm transfer",
+        "transfer_marked": "A participant marked the gift as transferred. The bot does not verify NFT ownership or payment; verify both independently.",
         "buyer_accept": "You accepted the offer. Transfer the gift only after independently checking the terms and payment. This bot does not hold or automatically transfer Stars.",
         "buyer_decline": "You declined the offer.",
         "expired": "This offer has already been processed.",
@@ -55,7 +61,10 @@ TEXTS = {
         "accept": "接受",
         "decline": "拒绝",
         "accepted": "卖家已接受 {gift} 的报价：{amount}⭐️。\n\n这仅表示卖家接受报价，并不代表 Stars 已被托管或转账。转移礼物前，请自行核实付款和交易条件。",
-        "declined": "卖家拒绝了 {gift} 的报价。",
+        "declined": "❌ 卖家拒绝了 {gift} 的报价。",
+        "transfer_link": "转移礼物",
+        "confirm_transfer": "确认已转移",
+        "transfer_marked": "参与者已标记礼物转移。机器人无法验证 NFT 所有权或付款，请自行核实。",
         "buyer_accept": "您已接受报价。请先自行核实交易条件和付款，再转移礼物。本机器人不会托管或自动转账 Stars。",
         "buyer_decline": "您已拒绝报价。",
         "expired": "此报价已处理。",
@@ -139,22 +148,39 @@ def parse_offer(text):
     return url, int(amount_text), language, gift_name
 
 def handle_business_message(message):
-    # Only act on messages sent from a connected Business account.
+    # Commands must be sent by the owner of the connected Business account,
+    # not by the seller. Telegram delivers connected-account messages here.
     connection_id = message.get("business_connection_id")
     text = message.get("text")
+    sender = message.get("from") or {}
     if not connection_id or not text or message.get("sender_business_bot"):
         return
+
+    try:
+        connection = api("getBusinessConnection", {"business_connection_id": connection_id})
+    except Exception:
+        log.exception("Could not verify Business connection")
+        return
+
+    owner_id = (connection.get("user") or {}).get("id")
+    if not owner_id or sender.get("id") != owner_id:
+        return
+    if not connection.get("is_enabled", False):
+        log.warning("Business connection is disabled")
+        return
+
     parsed = parse_offer(text)
     if not parsed:
-        # Avoid replying to every ordinary chat message; only explain on likely NFT commands.
         if "t.me/nft/" in text:
-            send_message(message["chat"]["id"], TEXTS["ru"]["bad"], connection_id)
+            lang = "ru"
+            send_message(message["chat"]["id"], TEXTS[lang]["bad"], connection_id)
         return
 
     gift_url, amount, language, gift_name = parsed
     chat = message.get("chat", {})
-    seller = chat.get("first_name") or chat.get("title") or "Продавец"
-    seller = html.escape(seller)
+    if chat.get("type") != "private":
+        return
+    seller = html.escape(chat.get("first_name") or chat.get("title") or "Продавец")
     safe_gift = html.escape(gift_name)
     strings = TEXTS[language]
     offer_id = uuid.uuid4().hex[:12]
@@ -181,53 +207,76 @@ def handle_business_message(message):
     log.info("Offer %s created in chat %s", offer_id, chat["id"])
 
 def handle_callback(query):
-    data = query.get("data", "")
-    match = re.fullmatch(r"(accept|decline):([a-f0-9]{12})", data)
+    match = re.fullmatch(r"(accept|decline|transfer):([a-f0-9]{12})", query.get("data", ""))
     if not match:
         api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Unknown action"})
         return
+
     action, offer_id = match.groups()
+    msg = query.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
     with db() as conn:
         offer = conn.execute("SELECT * FROM offers WHERE id=?", (offer_id,)).fetchone()
-        if not offer:
+        if not offer or int(chat_id or 0) != int(offer["chat_id"]):
             api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Offer not found"})
             return
-        if offer["status"] != "pending":
+
+        current = offer["status"]
+        if action in ("accept", "decline") and current != "pending":
             api("answerCallbackQuery", {
                 "callback_query_id": query["id"],
                 "text": TEXTS[offer["language"]]["expired"],
                 "show_alert": True
             })
             return
-        status = "accepted" if action == "accept" else "declined"
-        conn.execute("UPDATE offers SET status=? WHERE id=? AND status='pending'", (status, offer_id))
+        if action == "transfer" and current != "accepted":
+            api("answerCallbackQuery", {
+                "callback_query_id": query["id"],
+                "text": TEXTS[offer["language"]]["expired"],
+                "show_alert": True
+            })
+            return
+
+        strings = TEXTS[offer["language"]]
+        if action == "accept":
+            conn.execute("UPDATE offers SET status='accepted' WHERE id=? AND status='pending'", (offer_id,))
+            body = strings["accepted"].format(
+                gift=html.escape(offer["gift_name"]), amount=offer["amount"]
+            )
+            body += "\\n\\n<a href=\\"{url}\\">{button}</a>".format(
+                url=html.escape(TRANSFER_URL, quote=True),
+                button=html.escape(strings.get("transfer_link", "Передать подарок"))
+            )
+            keyboard = {"inline_keyboard": [[
+                {"text": strings.get("confirm_transfer", "Подтвердить передачу"),
+                 "callback_data": f"transfer:{offer_id}"}
+            ]]}
+        elif action == "decline":
+            conn.execute("UPDATE offers SET status='declined' WHERE id=? AND status='pending'", (offer_id,))
+            body = strings["declined"].format(gift=html.escape(offer["gift_name"]))
+            keyboard = {"inline_keyboard": []}
+        else:
+            conn.execute("UPDATE offers SET status='transfer_marked' WHERE id=? AND status='accepted'", (offer_id,))
+            body = strings.get(
+                "transfer_marked",
+                "Передача отмечена участником. Это не является автоматической проверкой NFT или оплаты."
+            )
+            keyboard = {"inline_keyboard": []}
         conn.commit()
 
     api("answerCallbackQuery", {"callback_query_id": query["id"]})
-    strings = TEXTS[offer["language"]]
-    if action == "accept":
-        seller_text = strings["buyer_accept"]
-        buyer_text = strings["accepted"].format(
-            gift=html.escape(offer["gift_name"]), amount=offer["amount"]
-        )
-    else:
-        seller_text = strings["buyer_decline"]
-        buyer_text = strings["declined"].format(gift=html.escape(offer["gift_name"]))
-
-    msg = query.get("message") or {}
-    connection_id = msg.get("business_connection_id") or offer["connection_id"]
     try:
-        send_message(offer["chat_id"], seller_text, connection_id)
+        api("editMessageText", {
+            "business_connection_id": offer["connection_id"],
+            "chat_id": offer["chat_id"],
+            "message_id": msg.get("message_id") or offer["message_id"],
+            "text": body,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+            "reply_markup": keyboard
+        })
     except Exception:
-        log.exception("Could not send seller status for offer %s", offer_id)
-
-    # The callback user is the seller who pressed the button. Send the status
-    # to the connected Business chat; do not pretend that any Stars were escrowed.
-    log.info("Offer %s changed to %s", offer_id, status)
-    try:
-        send_message(offer["chat_id"], buyer_text, connection_id)
-    except Exception:
-        log.exception("Could not send offer status for %s", offer_id)
+        log.exception("Could not update offer message %s", offer_id)
 
 def process_update(update):
     if "business_message" in update:
