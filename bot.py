@@ -133,6 +133,46 @@ def send_message(chat_id, text, connection_id=None, reply_markup=None, link_prev
         payload["link_preview_options"] = {"is_disabled": True}
     return api("sendMessage", payload)
 
+def fetch_nft_image(gift_url):
+    """Try to read the public Telegram NFT page's Open Graph image."""
+    try:
+        request = Request(
+            gift_url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; NFTOfferBot/1.0)"}
+        )
+        with urlopen(request, timeout=8) as response:
+            page = response.read(1_500_000).decode("utf-8", "replace")
+        patterns = [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']'
+        ]
+        for pattern in patterns:
+            found = re.search(pattern, page, re.IGNORECASE)
+            if found:
+                image_url = html.unescape(found.group(1)).strip()
+                if image_url.startswith("https://"):
+                    return image_url
+    except Exception as exc:
+        log.info("NFT preview image unavailable for %s: %s", gift_url, exc)
+    return None
+
+def send_offer_card(chat_id, caption, connection_id, reply_markup, gift_url):
+    image_url = fetch_nft_image(gift_url)
+    if image_url:
+        try:
+            return api("sendPhoto", {
+                "chat_id": chat_id,
+                "photo": image_url,
+                "caption": caption,
+                "parse_mode": "HTML",
+                "business_connection_id": connection_id,
+                "reply_markup": reply_markup
+            })
+        except Exception:
+            log.exception("Could not send NFT photo card; falling back to message")
+    return send_message(chat_id, caption, connection_id, reply_markup, gift_url)
+
 def parse_offer(text):
     parts = (text or "").strip().split()
     if len(parts) != 3:
@@ -185,7 +225,7 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name):
         seller=seller, url=html.escape(gift_url, quote=True),
         gift=safe_gift, amount=amount
     )
-    sent = send_message(chat["id"], text_out, connection_id, markup, gift_url)
+    sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
     with db() as conn:
         conn.execute(
             """INSERT INTO offers
