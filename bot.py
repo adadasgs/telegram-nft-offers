@@ -220,47 +220,29 @@ def handle_callback(query):
         if not offer or int(chat_id or 0) != int(offer["chat_id"]):
             api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Offer not found"})
             return
-
-        current = offer["status"]
-        if action in ("accept", "decline") and current != "pending":
-            api("answerCallbackQuery", {
-                "callback_query_id": query["id"],
-                "text": TEXTS[offer["language"]]["expired"],
-                "show_alert": True
-            })
-            return
-        if action == "transfer" and current != "accepted":
-            api("answerCallbackQuery", {
-                "callback_query_id": query["id"],
-                "text": TEXTS[offer["language"]]["expired"],
-                "show_alert": True
-            })
-            return
-
         strings = TEXTS[offer["language"]]
+        status = offer["status"]
+        if action in ("accept", "decline") and status != "pending":
+            api("answerCallbackQuery", {"callback_query_id": query["id"], "text": strings["expired"], "show_alert": True})
+            return
+        if action == "transfer" and status != "accepted":
+            api("answerCallbackQuery", {"callback_query_id": query["id"], "text": strings["expired"], "show_alert": True})
+            return
+
         if action == "accept":
             conn.execute("UPDATE offers SET status='accepted' WHERE id=? AND status='pending'", (offer_id,))
-            body = strings["accepted"].format(
-                gift=html.escape(offer["gift_name"]), amount=offer["amount"]
-            )
-            body += "\\n\\n<a href=\\"{url}\\">{button}</a>".format(
-                url=html.escape(TRANSFER_URL, quote=True),
-                button=html.escape(strings.get("transfer_link", "Передать подарок"))
-            )
-            keyboard = {"inline_keyboard": [[
-                {"text": strings.get("confirm_transfer", "Подтвердить передачу"),
-                 "callback_data": f"transfer:{offer_id}"}
-            ]]}
+            body = strings["accepted"].format(gift=html.escape(offer["gift_name"]), amount=offer["amount"])
+            keyboard = {"inline_keyboard": [
+                [{"text": strings["transfer_link"], "url": TRANSFER_URL}],
+                [{"text": strings["confirm_transfer"], "callback_data": f"transfer:{offer_id}"}]
+            ]}
         elif action == "decline":
             conn.execute("UPDATE offers SET status='declined' WHERE id=? AND status='pending'", (offer_id,))
             body = strings["declined"].format(gift=html.escape(offer["gift_name"]))
             keyboard = {"inline_keyboard": []}
         else:
             conn.execute("UPDATE offers SET status='transfer_marked' WHERE id=? AND status='accepted'", (offer_id,))
-            body = strings.get(
-                "transfer_marked",
-                "Передача отмечена участником. Это не является автоматической проверкой NFT или оплаты."
-            )
+            body = strings["transfer_marked"]
             keyboard = {"inline_keyboard": []}
         conn.commit()
 
@@ -270,9 +252,7 @@ def handle_callback(query):
             "business_connection_id": offer["connection_id"],
             "chat_id": offer["chat_id"],
             "message_id": msg.get("message_id") or offer["message_id"],
-            "text": body,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
+            "text": body, "parse_mode": "HTML", "disable_web_page_preview": True,
             "reply_markup": keyboard
         })
     except Exception:
