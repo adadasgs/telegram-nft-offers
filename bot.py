@@ -134,7 +134,7 @@ def api(method, payload=None):
         raise RuntimeError("BOT_TOKEN environment variable is not set")
     body = json.dumps(payload or {}).encode("utf-8")
     # Serialize Telegram API calls and respect flood-control retry_after values.
-    for attempt in range(4):
+    for attempt in range(6):
         with API_LOCK:
             req = Request(API + method, data=body, headers={"Content-Type": "application/json"})
             try:
@@ -142,14 +142,14 @@ def api(method, payload=None):
                     data = json.loads(response.read().decode("utf-8"))
             except HTTPError as exc:
                 detail = exc.read().decode("utf-8", "replace")
-                if exc.code == 429 and attempt < 3:
+                if exc.code == 429 and attempt < 5:
                     try:
                         error_data = json.loads(detail)
                         wait_seconds = int((error_data.get("parameters") or {}).get("retry_after", 1))
                     except (ValueError, TypeError):
                         wait_seconds = 1
                     wait_seconds = max(1, min(wait_seconds, 300))
-                    log.warning("Telegram rate limit on %s; retrying in %s seconds (attempt %s/4)",
+                    log.warning("Telegram rate limit on %s; retrying in %s seconds (attempt %s/6)",
                                 method, wait_seconds + 1, attempt + 1)
                     time.sleep(wait_seconds + 1)
                     continue
@@ -157,16 +157,16 @@ def api(method, payload=None):
             except URLError as exc:
                 raise RuntimeError(f"Telegram API connection error: {exc}") from exc
             if not data.get("ok"):
-                if data.get("error_code") == 429 and attempt < 3:
+                if data.get("error_code") == 429 and attempt < 5:
                     wait_seconds = int((data.get("parameters") or {}).get("retry_after", 1))
                     wait_seconds = max(1, min(wait_seconds, 300))
-                    log.warning("Telegram rate limit on %s; retrying in %s seconds (attempt %s/4)",
+                    log.warning("Telegram rate limit on %s; retrying in %s seconds (attempt %s/6)",
                                 method, wait_seconds + 1, attempt + 1)
                     time.sleep(wait_seconds + 1)
                     continue
                 raise RuntimeError(f"Telegram API error: {data}")
             return data.get("result")
-    raise RuntimeError(f"Telegram API rate limit persisted for {method}")
+    raise RuntimeError(f"Telegram API rate limit persisted for {method} after 6 attempts")
 
 def send_message(chat_id, text, connection_id=None, reply_markup=None, link_preview_url=None):
     payload = {
@@ -224,7 +224,12 @@ def send_offer_card(chat_id, caption, connection_id, reply_markup, gift_url):
                 "business_connection_id": connection_id,
                 "reply_markup": reply_markup
             })
-        except Exception:
+        except Exception as exc:
+            # A 429 is a flood-control response, not a broken photo. Do not immediately
+            # issue a second sendMessage request and worsen the same rate limit.
+            if "HTTP 429" in str(exc) or "rate limit persisted" in str(exc).lower():
+                log.error("Telegram rate-limited sendPhoto; not sending a duplicate fallback message: %s", exc)
+                raise
             log.exception("Could not send NFT photo card; falling back to message")
     return send_message(chat_id, caption, connection_id, reply_markup, gift_url)
 
