@@ -38,7 +38,7 @@ TEXTS = {
         "offer": "{seller} готов приобрести подарок\n<a href=\"{url}\">{gift}</a>.\n\nПредложенная сумма: <b>{amount_display}</b>\nПодтвердите передачу, если условия вам подходят.",
         "accept": "Принять",
         "decline": "Отклонить",
-        "accepted": "Продавец принял предложение по подарку <a href=\"{gift_url}\">{gift}</a> на сумму {amount_display}.\n\nЭто подтверждение согласия продавца, а не резервирование или перевод Stars. Передавайте подарок только после самостоятельной проверки условий.",
+        "accepted": "<b>Сделка с NFT</b>\\n\\n<b>Заказ:</b> #{order_code}\\n\\nПокупатель принял предложение на <b>{amount_display}</b> за подарок <a href=\\\"{gift_url}\\\">{gift}</a>. Это подтверждает согласие на сделку, но не означает, что средства зарезервированы или удерживаются ботом.\\n\\n<b>Инструкция для завершения сделки:</b>\\n1. Нажмите «Передать подарок» ниже.\\n2. Выберите <a href=\\\"{gift_url}\\\">{gift}</a>.\\n3. После фактической передачи нажмите «Подтвердить передачу» ниже.\\n\\nПередавайте подарок только после самостоятельной проверки оплаты. Бот не хранит средства и не может автоматически начислить их на баланс.",
         "declined": "❌ Продавец отклонил предложение по подарку {gift}.",
         "transfer_link": "Передать подарок",
         "confirm_transfer": "Подтвердить передачу",
@@ -53,7 +53,7 @@ TEXTS = {
         "offer": "{seller} is interested in purchasing this gift\n<a href=\"{url}\">{gift}</a>.\n\nOffer amount: <b>{amount_display}</b>\nAccept the offer if these terms work for you.",
         "accept": "Accept",
         "decline": "Decline",
-        "accepted": "The seller accepted the offer for <a href=\"{gift_url}\">{gift}</a> at {amount_display}.\n\nThis confirms the seller's acceptance only. It does not reserve or transfer Stars. Verify the terms and payment independently before transferring the gift.",
+        "accepted": "<b>NFT deal</b>\\n\\n<b>Order:</b> #{order_code}\\n\\nThe buyer accepted the offer of <b>{amount_display}</b> for <a href=\\\"{gift_url}\\\">{gift}</a>. This confirms agreement only; the bot does not reserve or hold funds.\\n\\n<b>How to complete the deal:</b>\\n1. Tap “Transfer the gift” below.\\n2. Select <a href=\\\"{gift_url}\\\">{gift}</a>.\\n3. After the gift is actually transferred, tap “Confirm transfer” below.\\n\\nTransfer only after independently verifying payment. The bot cannot hold funds or automatically credit a balance.",
         "declined": "❌ The seller declined the offer for {gift}.",
         "transfer_link": "Transfer the gift",
         "confirm_transfer": "Confirm transfer",
@@ -68,7 +68,7 @@ TEXTS = {
         "offer": "{seller} 有意购买这份礼物\n<a href=\"{url}\">{gift}</a>。\n\n报价：<b>{amount_display}</b>\n如果您接受此条件，请确认。",
         "accept": "接受",
         "decline": "拒绝",
-        "accepted": "卖家已接受 <a href=\"{gift_url}\">{gift}</a> 的报价：{amount_display}。\n\n这仅表示卖家接受报价，并不代表 Stars 已被托管或转账。转移礼物前，请自行核实付款和交易条件。",
+        "accepted": "<b>NFT 交易</b>\\n\\n<b>订单：</b>#{order_code}\\n\\n买家已接受以 <b>{amount_display}</b> 购买礼物 <a href=\\\"{gift_url}\\\">{gift}</a>。这仅表示双方同意交易，机器人不会预留或托管资金。\\n\\n<b>完成交易的步骤：</b>\\n1. 点击下方“转移礼物”。\\n2. 选择 <a href=\\\"{gift_url}\\\">{gift}</a>。\\n3. 实际转移礼物后，点击下方“确认转移”。\\n\\n请先自行核实付款再转移礼物。机器人无法托管资金或自动入账。",
         "declined": "❌ 卖家拒绝了 {gift} 的报价。",
         "transfer_link": "转移礼物",
         "confirm_transfer": "确认已转移",
@@ -778,9 +778,9 @@ def handle_callback(query):
 
         if action == "accept":
             conn.execute("UPDATE offers SET status='accepted' WHERE id=? AND status='pending'", (offer_id,))
-            body = strings["accepted"].format(gift=html.escape(offer["gift_name"]), gift_url=html.escape(offer["gift_url"], quote=True), amount_display=html.escape(format_amount(offer["amount"], offer["currency"])))
+            body = strings["accepted"].format(order_code=offer_id.upper(), gift=html.escape(offer["gift_name"]), gift_url=html.escape(offer["gift_url"], quote=True), amount_display=html.escape(format_amount(offer["amount"], offer["currency"], offer["gift_name"])))
             keyboard = {"inline_keyboard": [
-                [{"text": strings["transfer_link"], "url": TRANSFER_URL}],
+                [{"text": strings["transfer_link"], "url": offer["gift_url"]}],
                 [{"text": strings["confirm_transfer"], "callback_data": f"transfer:{offer_id}"}]
             ]}
         elif action == "decline":
