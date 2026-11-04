@@ -400,7 +400,7 @@ def handle_private_message(message):
     elif status == "pending":
         send_message(user_id, "⏳ Ваша заявка уже отправлена. Ожидайте решения администратора.")
     else:
-        send_message(user_id, "🔒 <b>Доступ заблокирован</b>\\nЧтобы пользоваться офферами, отправьте заявку на проверку.", reply_markup={
+        send_message(user_id, "🔒 <b>Доступ заблокирован</b>\nЧтобы пользоваться офферами, отправьте заявку на проверку.", reply_markup={
             "inline_keyboard": [[{"text": "Отправить на проверку", "callback_data": f"request_access:{user_id}"}]]
         })
 
@@ -427,9 +427,9 @@ def handle_callback(query):
                     (target_id, user.get("username"), user.get("first_name"), int(time.time())))
                 conn.commit()
             notify_admin(
-                "🆕 <b>Новая заявка на доступ к офферам</b>\\n"
+                "🆕 <b>Новая заявка на доступ к офферам</b>\n"
                 f"Пользователь: {html.escape(user.get('first_name') or 'Без имени')} "
-                f"(@{html.escape(user.get('username') or 'нет username')})\\nID: <code>{target_id}</code>",
+                f"(@{html.escape(user.get('username') or 'нет username')})\nID: <code>{target_id}</code>",
                 {"inline_keyboard": [[
                     {"text": "✅ Принять", "callback_data": f"access_approve:{target_id}"},
                     {"text": "❌ Отклонить", "callback_data": f"access_decline:{target_id}"}
@@ -525,13 +525,13 @@ def handle_callback(query):
         conn.commit()
 
     if action == "accept":
-        notify_admin(f"✅ <b>Оффер принят</b>\\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\\nСумма: {offer['amount']}⭐️\\nID: <code>{offer_id}</code>")
+        notify_admin(f"✅ <b>Оффер принят</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\nСумма: {offer['amount']}⭐️\nID: <code>{offer_id}</code>")
     elif action == "decline":
-        notify_admin(f"❌ <b>Оффер отклонён</b>\\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\\nСумма: {offer['amount']}⭐️\\nID: <code>{offer_id}</code>")
+        notify_admin(f"❌ <b>Оффер отклонён</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\nСумма: {offer['amount']}⭐️\nID: <code>{offer_id}</code>")
     else:
         notify_admin(
-            f"📩 <b>Пользователь подтвердил передачу</b>\\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\\n"
-            f"Сумма: {offer['amount']}⭐️\\nID: <code>{offer_id}</code>\\nПодтвердить передачу?",
+            f"📩 <b>Пользователь подтвердил передачу</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\n"
+            f"Сумма: {offer['amount']}⭐️\nID: <code>{offer_id}</code>\nПодтвердить передачу?",
             {"inline_keyboard": [[
                 {"text": "✅ Принять", "callback_data": f"transfer_approve:{offer_id}"},
                 {"text": "❌ Отклонить", "callback_data": f"transfer_reject:{offer_id}"}
@@ -552,7 +552,7 @@ def handle_callback(query):
             edit_payload["caption"] = body
         else:
             edit_payload["text"] = body
-            edit_payload["link_preview_options"] = {"is_disabled": True}
+            edit_payload["link_preview_options"] = {"url": offer["gift_url"], "prefer_large_media": True, "show_above_text": False}
         api(edit_method, edit_payload)
     except Exception:
         log.exception("Could not update offer message %s", offer_id)
