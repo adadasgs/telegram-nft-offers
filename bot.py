@@ -147,39 +147,17 @@ def parse_offer(text):
     gift_name = match.group(1).replace("-", " ")
     return url, int(amount_text), language, gift_name
 
-def handle_business_message(message):
-    # Commands must be sent by the owner of the connected Business account,
-    # not by the seller. Telegram delivers connected-account messages here.
-    connection_id = message.get("business_connection_id")
-    text = message.get("text")
-    sender = message.get("from") or {}
-    if not connection_id or not text or message.get("sender_business_bot"):
-        return
+def parse_gift_url(value):
+    parsed = urlparse((value or "").strip())
+    if parsed.scheme != "https" or parsed.netloc.lower() not in ("t.me", "www.t.me"):
+        return None
+    match = re.fullmatch(r"/nft/([A-Za-z0-9_-]+)", parsed.path)
+    if not match:
+        return None
+    return (value.strip(), match.group(1).replace("-", " "))
 
-    try:
-        connection = api("getBusinessConnection", {"business_connection_id": connection_id})
-    except Exception:
-        log.exception("Could not verify Business connection")
-        return
-
-    owner_id = (connection.get("user") or {}).get("id")
-    if not owner_id or sender.get("id") != owner_id:
-        return
-    if not connection.get("is_enabled", False):
-        log.warning("Business connection is disabled")
-        return
-
-    parsed = parse_offer(text)
-    if not parsed:
-        if "t.me/nft/" in text:
-            lang = "ru"
-            send_message(message["chat"]["id"], TEXTS[lang]["bad"], connection_id)
-        return
-
-    gift_url, amount, language, gift_name = parsed
+def create_offer(message, connection_id, gift_url, amount, language, gift_name):
     chat = message.get("chat", {})
-    if chat.get("type") != "private":
-        return
     seller = html.escape(chat.get("first_name") or chat.get("title") or "Продавец")
     safe_gift = html.escape(gift_name)
     strings = TEXTS[language]
@@ -205,6 +183,111 @@ def handle_business_message(message):
         )
         conn.commit()
     log.info("Offer %s created in chat %s", offer_id, chat["id"])
+
+def handle_business_message(message):
+    # Only the connected account owner may start an offer flow.
+    connection_id = message.get("business_connection_id")
+    text = (message.get("text") or "").strip()
+    sender = message.get("from") or {}
+    if not connection_id or not text or message.get("sender_business_bot"):
+        return
+
+    try:
+        connection = api("getBusinessConnection", {"business_connection_id": connection_id})
+    except Exception:
+        log.exception("Could not verify Business connection")
+        return
+
+    owner_id = (connection.get("user") or {}).get("id")
+    if not owner_id or sender.get("id") != owner_id:
+        return
+    if not connection.get("is_enabled", False):
+        log.warning("Business connection is disabled")
+        return
+
+    chat = message.get("chat", {})
+    if chat.get("type") != "private":
+        return
+    chat_id = chat.get("id")
+    key = f"{connection_id}:{chat_id}"
+
+    # Keep the old compact syntax working: URL amount language.
+    parsed = parse_offer(text)
+    if parsed:
+        gift_url, amount, language, gift_name = parsed
+        create_offer(message, connection_id, gift_url, amount, language, gift_name)
+        return
+
+    # New step-by-step syntax: URL -> amount -> language.
+    gift = parse_gift_url(text)
+    if gift:
+        gift_url, gift_name = gift
+        with db() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS offer_drafts (
+                    draft_key TEXT PRIMARY KEY,
+                    connection_id TEXT NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    gift_url TEXT NOT NULL,
+                    gift_name TEXT NOT NULL,
+                    amount INTEGER,
+                    stage TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            """)
+            conn.execute("""
+                INSERT INTO offer_drafts
+                (draft_key, connection_id, chat_id, gift_url, gift_name, amount, stage, updated_at)
+                VALUES (?, ?, ?, ?, ?, NULL, 'amount', ?)
+                ON CONFLICT(draft_key) DO UPDATE SET
+                    gift_url=excluded.gift_url, gift_name=excluded.gift_name,
+                    amount=NULL, stage='amount', updated_at=excluded.updated_at
+            """, (key, connection_id, chat_id, gift_url, gift_name, int(time.time())))
+            conn.commit()
+        send_message(chat_id, "Ссылка на NFT получена. Теперь отправь сумму в Stars отдельным сообщением, например: 2300", connection_id)
+        return
+
+    with db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS offer_drafts (
+                draft_key TEXT PRIMARY KEY,
+                connection_id TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                gift_url TEXT NOT NULL,
+                gift_name TEXT NOT NULL,
+                amount INTEGER,
+                stage TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+        """)
+        draft = conn.execute("SELECT * FROM offer_drafts WHERE draft_key=?", (key,)).fetchone()
+
+    if not draft:
+        if "t.me/nft/" in text:
+            send_message(chat_id, "Не удалось распознать ссылку. Отправь прямую ссылку вида https://t.me/nft/SnoopCigar-84846", connection_id)
+        return
+
+    if draft["stage"] == "amount":
+        if not re.fullmatch(r"[1-9][0-9]{0,7}", text):
+            send_message(chat_id, "Укажи сумму только цифрами, например: 2300", connection_id)
+            return
+        amount = int(text)
+        with db() as conn:
+            conn.execute("UPDATE offer_drafts SET amount=?, stage='language', updated_at=? WHERE draft_key=?",
+                         (amount, int(time.time()), key))
+            conn.commit()
+        send_message(chat_id, "Сумма получена. Теперь отправь язык оффера: ru, en или zh", connection_id)
+        return
+
+    if draft["stage"] == "language":
+        language = text.lower()
+        if language not in TEXTS:
+            send_message(chat_id, "Укажи язык одним из вариантов: ru, en или zh", connection_id)
+            return
+        create_offer(message, connection_id, draft["gift_url"], int(draft["amount"]), language, draft["gift_name"])
+        with db() as conn:
+            conn.execute("DELETE FROM offer_drafts WHERE draft_key=?", (key,))
+            conn.commit()
 
 def handle_callback(query):
     match = re.fullmatch(r"(accept|decline|transfer):([a-f0-9]{12})", query.get("data", ""))
