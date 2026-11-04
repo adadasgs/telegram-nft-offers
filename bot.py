@@ -306,7 +306,7 @@ def parse_offer(text):
         "руб": "rub", "рубли": "rub"
     }
     currency = aliases.get(currency)
-    if currency not in ("stars", "gram", "rub") or !re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2})?", language):
+    if currency not in ("stars", "gram", "rub") or not re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2})?", language):
         return None
     if not re.fullmatch(r"[1-9][0-9]{0,17}", amount_text):
         return None
@@ -461,7 +461,7 @@ def handle_business_message(message):
         return
 
     if draft["stage"] == "amount":
-        if not re.fullmatch(r"[1-9][0-9]{0,7}", text):
+        if not re.fullmatch(r"[1-9][0-9]{0,17}", text):
             send_message(chat_id, "Укажи сумму только цифрами, например: 2300", connection_id)
             return
         amount = int(text)
