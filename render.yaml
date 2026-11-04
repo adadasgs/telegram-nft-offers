@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: telegram-nft-offers
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    disk:
+      name: offers-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DB_PATH
+        value: /var/data/offers.sqlite3
+      - key: TRANSFER_URL
+        value: https://t.me/Autooffersgift
