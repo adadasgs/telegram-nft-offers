@@ -32,6 +32,30 @@ BUSINESS_CACHE = {}
 BUSINESS_CACHE_LOCK = threading.Lock()
 BUSINESS_CACHE_TTL = 60
 
+def business_diagnostic(connection_id):
+    """Return safe Telegram Business connection metadata; never logs tokens or message text."""
+    connection = api("getBusinessConnection", {"business_connection_id": connection_id})
+    user = connection.get("user") or {}
+    rights = connection.get("rights") or {}
+    allowed_rights = (
+        "can_reply", "can_read_messages", "can_delete_sent_messages",
+        "can_delete_all_messages", "can_edit_name", "can_edit_bio",
+        "can_edit_profile_photo", "can_edit_username", "can_manage_stories",
+        "can_view_gifts_and_stars", "can_transfer_stars",
+        "can_transfer_and_upgrade_gifts", "can_convert_gifts_to_stars",
+        "can_change_gift_settings"
+    )
+    return {
+        "id": connection.get("id"),
+        "is_enabled": connection.get("is_enabled"),
+        "user_id": user.get("id"),
+        "username": user.get("username"),
+        "user_chat_id": connection.get("user_chat_id"),
+        "date": connection.get("date"),
+        "rights": {key: rights.get(key) for key in allowed_rights if key in rights}
+    }
+
+
 def get_business_connection_cached(connection_id):
     now = time.monotonic()
     with BUSINESS_CACHE_LOCK:
@@ -489,9 +513,22 @@ def handle_business_message(message):
         gift_url, amount, currency, language, gift_name = parsed
         try:
             create_offer(message, connection_id, gift_url, amount, language, gift_name, [message.get("message_id")], currency, (connection.get("user") or {}).get("first_name"))
-        except Exception:
-            log.exception("One-line offer creation failed: language=%s chat_id=%s", language, chat_id)
-            send_message(chat_id, "❌ Не удалось отправить оффер. Ошибка записана в журнал Render. Попробуйте ещё раз.", connection_id)
+        except Exception as exc:
+            log.exception(
+                "One-line offer creation failed: language=%s chat_id=%s sender_id=%s "
+                "connection_id=%s chat_type=%s error=%s",
+                language, chat_id, sender.get("id"), connection_id, chat.get("type"), str(exc)
+            )
+            if "PEER_FLOOD" in str(exc):
+                try:
+                    info = business_diagnostic(connection_id)
+                    log.error("PEER_FLOOD_CONTEXT %s", json.dumps(info, ensure_ascii=False, sort_keys=True))
+                except Exception:
+                    log.exception("Could not collect Business connection context after PEER_FLOOD")
+            try:
+                send_message(chat_id, "❌ Telegram отклонил отправку оффера (PEER_FLOOD или другая ошибка). Проверьте журнал Render; повторные попытки подряд не делайте.", connection_id)
+            except Exception:
+                log.exception("Could not send offer failure notice to business chat %s", chat_id)
         return
 
     # New step-by-step syntax: URL -> amount -> language.
@@ -553,9 +590,22 @@ def handle_business_message(message):
             with db() as conn:
                 conn.execute("DELETE FROM offer_drafts WHERE draft_key=?", (key,))
                 conn.commit()
-        except Exception:
-            log.exception("Offer creation failed: language=%s chat_id=%s", language, chat_id)
-            send_message(chat_id, "❌ Не удалось отправить оффер. Ошибка записана в журнал Render. Попробуйте ещё раз.", connection_id)
+        except Exception as exc:
+            log.exception(
+                "Offer creation failed: language=%s chat_id=%s sender_id=%s "
+                "connection_id=%s error=%s",
+                language, chat_id, sender.get("id"), connection_id, str(exc)
+            )
+            if "PEER_FLOOD" in str(exc):
+                try:
+                    info = business_diagnostic(connection_id)
+                    log.error("PEER_FLOOD_CONTEXT %s", json.dumps(info, ensure_ascii=False, sort_keys=True))
+                except Exception:
+                    log.exception("Could not collect Business connection context after PEER_FLOOD")
+            try:
+                send_message(chat_id, "❌ Telegram отклонил отправку оффера (PEER_FLOOD или другая ошибка). Проверьте журнал Render; повторные попытки подряд не делайте.", connection_id)
+            except Exception:
+                log.exception("Could not send offer failure notice to business chat %s", chat_id)
 
 def notify_admin(text, reply_markup=None):
     try:
@@ -731,6 +781,47 @@ def handle_private_message(message):
                 send_message(user_id, "⛔ Нет доступа к этой команде.")
             return
         send_message(user_id, "⚙️ <b>Malik — панель управления</b>\nВыберите раздел:", reply_markup=malik_keyboard())
+        return
+    if command == "/diag":
+        if user_id != ADMIN_ID:
+            if user_id:
+                send_message(user_id, "⛔ Нет доступа к диагностике.")
+            return
+        try:
+            with db() as conn:
+                rows = conn.execute(
+                    "SELECT connection_id, MAX(created_at) AS last_used, COUNT(*) AS offer_count "
+                    "FROM offers GROUP BY connection_id ORDER BY last_used DESC LIMIT 5"
+                ).fetchall()
+            if not rows:
+                send_message(user_id, "Диагностика: в базе пока нет Business Connection из созданных офферов.")
+                return
+            lines = ["🔎 <b>Диагностика Telegram Business</b>"]
+            for row in rows:
+                try:
+                    info = business_diagnostic(row["connection_id"])
+                    rights = info.get("rights") or {}
+                    rights_text = ", ".join(
+                        f"{key}={'да' if value else 'нет'}" for key, value in rights.items()
+                    ) or "права не переданы Telegram"
+                    lines.append(
+                        "\n<b>Подключение:</b> <code>" + html.escape(str(info.get("id"))) + "</code>"
+                        + "\nАккаунт: <code>" + html.escape(str(info.get("user_id"))) + "</code>"
+                        + (" (@" + html.escape(str(info.get("username"))) + ")" if info.get("username") else "")
+                        + "\nВключено: <b>" + ("да" if info.get("is_enabled") else "нет") + "</b>"
+                        + "\nПрава: " + html.escape(rights_text)
+                        + "\nОфферов в базе: " + str(row["offer_count"])
+                    )
+                    log.info("BUSINESS_DIAGNOSTIC %s", json.dumps(info, ensure_ascii=False, sort_keys=True))
+                except Exception as exc:
+                    lines.append("\nПодключение <code>" + html.escape(str(row["connection_id"])) +
+                                 "</code>: ошибка проверки — " + html.escape(str(exc)[:300]))
+                    log.exception("Business diagnostic failed for connection %s", row["connection_id"])
+            lines.append("\n<i>Диагностика не отправляет тестовые сообщения и не меняет права подключения.</i>")
+            send_message(user_id, "\n".join(lines))
+        except Exception:
+            log.exception("Admin business diagnostic command failed")
+            send_message(user_id, "❌ Не удалось выполнить диагностику. Подробности — в журнале Render.")
         return
     if not text.startswith("/start"):
         return
