@@ -17,6 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DB_PATH = os.getenv("DB_PATH", "/var/data/offers.sqlite3")
 PORT = int(os.getenv("PORT", "10000"))
 TRANSFER_URL = os.getenv("TRANSFER_URL", "https://t.me/Autooffersgift")
+ADMIN_ID = 9189255415
 API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 
 logging.basicConfig(
@@ -30,7 +31,7 @@ TEXTS = {
         "offer": "{seller} готов приобрести подарок\n<a href=\"{url}\">{gift}</a>.\n\nПредложенная сумма: <b>{amount}⭐️</b>\nПодтвердите передачу, если условия вам подходят.",
         "accept": "Принять",
         "decline": "Отклонить",
-        "accepted": "Продавец принял предложение по подарку {gift} на сумму {amount}⭐️.\n\nЭто подтверждение согласия продавца, а не резервирование или перевод Stars. Передавайте подарок только после самостоятельной проверки условий.",
+        "accepted": "Продавец принял предложение по подарку <a href=\"{gift_url}\">{gift}</a> на сумму {amount}⭐️.\n\nЭто подтверждение согласия продавца, а не резервирование или перевод Stars. Передавайте подарок только после самостоятельной проверки условий.",
         "declined": "❌ Продавец отклонил предложение по подарку {gift}.",
         "transfer_link": "Передать подарок",
         "confirm_transfer": "Подтвердить передачу",
@@ -45,7 +46,7 @@ TEXTS = {
         "offer": "{seller} is interested in purchasing this gift\n<a href=\"{url}\">{gift}</a>.\n\nOffer amount: <b>{amount}⭐️</b>\nAccept the offer if these terms work for you.",
         "accept": "Accept",
         "decline": "Decline",
-        "accepted": "The seller accepted the offer for {gift} at {amount}⭐️.\n\nThis confirms the seller's acceptance only. It does not reserve or transfer Stars. Verify the terms and payment independently before transferring the gift.",
+        "accepted": "The seller accepted the offer for <a href=\"{gift_url}\">{gift}</a> at {amount}⭐️.\n\nThis confirms the seller's acceptance only. It does not reserve or transfer Stars. Verify the terms and payment independently before transferring the gift.",
         "declined": "❌ The seller declined the offer for {gift}.",
         "transfer_link": "Transfer the gift",
         "confirm_transfer": "Confirm transfer",
@@ -60,7 +61,7 @@ TEXTS = {
         "offer": "{seller} 有意购买这份礼物\n<a href=\"{url}\">{gift}</a>。\n\n报价：<b>{amount}⭐️</b>\n如果您接受此条件，请确认。",
         "accept": "接受",
         "decline": "拒绝",
-        "accepted": "卖家已接受 {gift} 的报价：{amount}⭐️。\n\n这仅表示卖家接受报价，并不代表 Stars 已被托管或转账。转移礼物前，请自行核实付款和交易条件。",
+        "accepted": "卖家已接受 <a href=\"{gift_url}\">{gift}</a> 的报价：{amount}⭐️。\n\n这仅表示卖家接受报价，并不代表 Stars 已被托管或转账。转移礼物前，请自行核实付款和交易条件。",
         "declined": "❌ 卖家拒绝了 {gift} 的报价。",
         "transfer_link": "转移礼物",
         "confirm_transfer": "确认已转移",
@@ -91,6 +92,15 @@ def db():
             language TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
             created_at INTEGER NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS access_requests (
+            user_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'pending',
+            username TEXT,
+            first_name TEXT,
+            updated_at INTEGER NOT NULL
         )
     """)
     conn.execute("""
@@ -292,6 +302,12 @@ def handle_business_message(message):
     if not connection.get("is_enabled", False):
         log.warning("Business connection is disabled")
         return
+    if owner_id != ADMIN_ID:
+        with db() as conn:
+            access = conn.execute("SELECT status FROM access_requests WHERE user_id=?", (owner_id,)).fetchone()
+        if not access or access["status"] != "approved":
+            log.info("Offer creation blocked for unapproved Business owner %s", owner_id)
+            return
 
     chat = message.get("chat", {})
     if chat.get("type") != "private":
@@ -359,13 +375,121 @@ def handle_business_message(message):
             conn.execute("DELETE FROM offer_drafts WHERE draft_key=?", (key,))
             conn.commit()
 
+def notify_admin(text, reply_markup=None):
+    try:
+        send_message(ADMIN_ID, text, reply_markup=reply_markup)
+    except Exception:
+        log.exception("Could not notify admin")
+
+def handle_private_message(message):
+    text = (message.get("text") or "").strip()
+    if not text.startswith("/start"):
+        return
+    user = message.get("from") or {}
+    user_id = user.get("id")
+    if not user_id:
+        return
+    if user_id == ADMIN_ID:
+        send_message(user_id, "Панель администратора. Здесь приходят заявки на доступ и подтверждения передачи.")
+        return
+    with db() as conn:
+        row = conn.execute("SELECT status FROM access_requests WHERE user_id=?", (user_id,)).fetchone()
+    status = row["status"] if row else None
+    if status == "approved":
+        send_message(user_id, "✅ Доступ открыт. Теперь можно пользоваться офферами.")
+    elif status == "pending":
+        send_message(user_id, "⏳ Ваша заявка уже отправлена. Ожидайте решения администратора.")
+    else:
+        send_message(user_id, "🔒 <b>Доступ заблокирован</b>\\nЧтобы пользоваться офферами, отправьте заявку на проверку.", reply_markup={
+            "inline_keyboard": [[{"text": "Отправить на проверку", "callback_data": f"request_access:{user_id}"}]]
+        })
+
 def handle_callback(query):
-    match = re.fullmatch(r"(accept|decline|transfer):([a-f0-9]{12})", query.get("data", ""))
-    if not match:
-        api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Unknown action"})
+    data = query.get("data", "")
+    actor_id = (query.get("from") or {}).get("id")
+    access_match = re.fullmatch(r"(request_access|access_approve|access_decline):([0-9]{1,20})", data)
+    review_match = re.fullmatch(r"(transfer_approve|transfer_reject):([a-f0-9]{12})", data)
+    offer_match = re.fullmatch(r"(accept|decline|transfer):([a-f0-9]{12})", data)
+
+    if access_match:
+        action, user_text = access_match.groups()
+        target_id = int(user_text)
+        if action == "request_access":
+            if actor_id != target_id:
+                api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Это не ваша заявка", "show_alert": True})
+                return
+            user = query.get("from") or {}
+            with db() as conn:
+                conn.execute("""INSERT INTO access_requests (user_id, status, username, first_name, updated_at)
+                    VALUES (?, 'pending', ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET status='pending', username=excluded.username,
+                    first_name=excluded.first_name, updated_at=excluded.updated_at""",
+                    (target_id, user.get("username"), user.get("first_name"), int(time.time())))
+                conn.commit()
+            notify_admin(
+                "🆕 <b>Новая заявка на доступ к офферам</b>\\n"
+                f"Пользователь: {html.escape(user.get('first_name') or 'Без имени')} "
+                f"(@{html.escape(user.get('username') or 'нет username')})\\nID: <code>{target_id}</code>",
+                {"inline_keyboard": [[
+                    {"text": "✅ Принять", "callback_data": f"access_approve:{target_id}"},
+                    {"text": "❌ Отклонить", "callback_data": f"access_decline:{target_id}"}
+                ]]}
+            )
+            api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Заявка отправлена"})
+            try:
+                api("editMessageText", {"chat_id": target_id, "message_id": query["message"]["message_id"],
+                    "text": "⏳ Заявка отправлена администратору. Ожидайте решения."})
+            except Exception:
+                pass
+            return
+        if actor_id != ADMIN_ID:
+            api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Только администратор может решать заявки", "show_alert": True})
+            return
+        new_status = "approved" if action == "access_approve" else "rejected"
+        with db() as conn:
+            conn.execute("""INSERT INTO access_requests (user_id, status, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at""",
+                (target_id, new_status, int(time.time())))
+            conn.commit()
+        send_message(target_id, "✅ Доступ одобрен. Напишите /start." if new_status == "approved" else "❌ Заявка отклонена.")
+        api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Решение сохранено"})
+        try:
+            api("editMessageReplyMarkup", {"chat_id": query["message"]["chat"]["id"],
+                "message_id": query["message"]["message_id"], "reply_markup": {"inline_keyboard": []}})
+        except Exception:
+            pass
         return
 
-    action, offer_id = match.groups()
+    if review_match:
+        action, offer_id = review_match.groups()
+        if actor_id != ADMIN_ID:
+            api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Только администратор может подтвердить передачу", "show_alert": True})
+            return
+        with db() as conn:
+            offer = conn.execute("SELECT * FROM offers WHERE id=?", (offer_id,)).fetchone()
+            if not offer or offer["status"] != "transfer_marked":
+                api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Запрос уже обработан", "show_alert": True})
+                return
+            new_status = "transfer_approved" if action == "transfer_approve" else "transfer_rejected"
+            conn.execute("UPDATE offers SET status=? WHERE id=?", (new_status, offer_id))
+            conn.commit()
+        notice = "✅ Администратор подтвердил отметку о передаче. Ожидайте в чате." if action == "transfer_approve" else "❌ Администратор не подтвердил передачу. Свяжитесь с поддержкой."
+        try:
+            send_message(offer["chat_id"], notice, offer["connection_id"])
+        except Exception:
+            log.exception("Could not send transfer decision to business chat")
+        api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Решение отправлено"})
+        try:
+            api("editMessageReplyMarkup", {"chat_id": query["message"]["chat"]["id"],
+                "message_id": query["message"]["message_id"], "reply_markup": {"inline_keyboard": []}})
+        except Exception:
+            pass
+        return
+
+    if not offer_match:
+        api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Неизвестное действие"})
+        return
+    action, offer_id = offer_match
     msg = query.get("message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
     with db() as conn:
@@ -385,7 +509,7 @@ def handle_callback(query):
 
         if action == "accept":
             conn.execute("UPDATE offers SET status='accepted' WHERE id=? AND status='pending'", (offer_id,))
-            body = strings["accepted"].format(gift=html.escape(offer["gift_name"]), amount=offer["amount"])
+            body = strings["accepted"].format(gift=html.escape(offer["gift_name"]), gift_url=html.escape(offer["gift_url"], quote=True), amount=offer["amount"])
             keyboard = {"inline_keyboard": [
                 [{"text": strings["transfer_link"], "url": TRANSFER_URL}],
                 [{"text": strings["confirm_transfer"], "callback_data": f"transfer:{offer_id}"}]
@@ -399,6 +523,20 @@ def handle_callback(query):
             body = strings["transfer_marked"]
             keyboard = {"inline_keyboard": []}
         conn.commit()
+
+    if action == "accept":
+        notify_admin(f"✅ <b>Оффер принят</b>\\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\\nСумма: {offer['amount']}⭐️\\nID: <code>{offer_id}</code>")
+    elif action == "decline":
+        notify_admin(f"❌ <b>Оффер отклонён</b>\\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\\nСумма: {offer['amount']}⭐️\\nID: <code>{offer_id}</code>")
+    else:
+        notify_admin(
+            f"📩 <b>Пользователь подтвердил передачу</b>\\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\\n"
+            f"Сумма: {offer['amount']}⭐️\\nID: <code>{offer_id}</code>\\nПодтвердить передачу?",
+            {"inline_keyboard": [[
+                {"text": "✅ Принять", "callback_data": f"transfer_approve:{offer_id}"},
+                {"text": "❌ Отклонить", "callback_data": f"transfer_reject:{offer_id}"}
+            ]]}
+        )
 
     api("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
@@ -420,7 +558,9 @@ def handle_callback(query):
         log.exception("Could not update offer message %s", offer_id)
 
 def process_update(update):
-    if "business_message" in update:
+    if "message" in update:
+        handle_private_message(update["message"])
+    elif "business_message" in update:
         handle_business_message(update["business_message"])
     elif "callback_query" in update:
         handle_callback(update["callback_query"])
@@ -430,7 +570,7 @@ def process_update(update):
 
 def polling_loop():
     offset = None
-    allowed = ["business_connection", "business_message", "callback_query"]
+    allowed = ["message", "business_connection", "business_message", "callback_query"]
     while True:
         try:
             payload = {"timeout": 30, "allowed_updates": allowed}
