@@ -575,14 +575,23 @@ def process_update(update):
 def polling_loop():
     offset = None
     allowed = ["message", "business_connection", "business_message", "callback_query"]
+    log.info("Telegram polling started; allowed updates: %s", allowed)
     while True:
         try:
             payload = {"timeout": 30, "allowed_updates": allowed}
             if offset is not None:
                 payload["offset"] = offset
             updates = api("getUpdates", payload)
+            if updates:
+                log.info("Telegram delivered %s update(s)", len(updates))
             for update in updates:
                 offset = update["update_id"] + 1
+                update_type = next((key for key in ("callback_query", "business_message", "message", "business_connection") if key in update), "unknown")
+                if update_type == "callback_query":
+                    callback = update["callback_query"]
+                    log.info("Telegram callback update received: data=%s", callback.get("data"))
+                else:
+                    log.info("Telegram update received: type=%s", update_type)
                 try:
                     process_update(update)
                 except Exception:
