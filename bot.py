@@ -492,7 +492,7 @@ def handle_callback(query):
         log.warning("Unknown callback data: %s", data)
         api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Неизвестное действие"})
         return
-    action, offer_id = offer_match
+    action, offer_id = offer_match.groups()
     log.info("Offer callback action=%s offer_id=%s", action, offer_id)
     msg = query.get("message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
