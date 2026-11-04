@@ -140,7 +140,7 @@ def fetch_nft_image(gift_url):
             gift_url,
             headers={"User-Agent": "Mozilla/5.0 (compatible; NFTOfferBot/1.0)"}
         )
-        with urlopen(request, timeout=8) as response:
+        with urlopen(request, timeout=4) as response:
             page = response.read(1_500_000).decode("utf-8", "replace")
         patterns = [
             r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
