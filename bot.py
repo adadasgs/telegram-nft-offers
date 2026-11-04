@@ -93,6 +93,22 @@ def db():
             created_at INTEGER NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS offer_drafts (
+            draft_key TEXT PRIMARY KEY,
+            connection_id TEXT NOT NULL,
+            chat_id INTEGER NOT NULL,
+            gift_url TEXT NOT NULL,
+            gift_name TEXT NOT NULL,
+            amount INTEGER,
+            stage TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            source_message_ids TEXT NOT NULL DEFAULT '[]'
+        )
+    """)
+    draft_columns = {row["name"] for row in conn.execute("PRAGMA table_info(offer_drafts)")}
+    if "source_message_ids" not in draft_columns:
+        conn.execute("ALTER TABLE offer_drafts ADD COLUMN source_message_ids TEXT NOT NULL DEFAULT '[]'")
     conn.commit()
     return conn
 
@@ -173,6 +189,17 @@ def send_offer_card(chat_id, caption, connection_id, reply_markup, gift_url):
             log.exception("Could not send NFT photo card; falling back to message")
     return send_message(chat_id, caption, connection_id, reply_markup, gift_url)
 
+def delete_source_messages(connection_id, chat_id, message_ids):
+    for message_id in message_ids or []:
+        try:
+            api("deleteMessage", {
+                "business_connection_id": connection_id,
+                "chat_id": chat_id,
+                "message_id": int(message_id)
+            })
+        except Exception as exc:
+            log.warning("Could not delete source message %s: %s", message_id, exc)
+
 def parse_offer(text):
     parts = (text or "").strip().split()
     if len(parts) != 3:
@@ -209,7 +236,7 @@ def parse_gift_url(value):
         return None
     return (value.strip(), format_gift_name(match.group(1)))
 
-def create_offer(message, connection_id, gift_url, amount, language, gift_name):
+def create_offer(message, connection_id, gift_url, amount, language, gift_name, source_message_ids=None):
     chat = message.get("chat", {})
     seller = html.escape(chat.get("first_name") or chat.get("title") or "Продавец")
     safe_gift = html.escape(gift_name)
@@ -236,6 +263,7 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name):
         )
         conn.commit()
     log.info("Offer %s created in chat %s", offer_id, chat["id"])
+    delete_source_messages(connection_id, chat["id"], source_message_ids or [message.get("message_id")])
 
 def handle_business_message(message):
     # Only the connected account owner may start an offer flow.
@@ -268,7 +296,7 @@ def handle_business_message(message):
     parsed = parse_offer(text)
     if parsed:
         gift_url, amount, language, gift_name = parsed
-        create_offer(message, connection_id, gift_url, amount, language, gift_name)
+        create_offer(message, connection_id, gift_url, amount, language, gift_name, [message.get("message_id")])
         return
 
     # New step-by-step syntax: URL -> amount -> language.
@@ -277,42 +305,20 @@ def handle_business_message(message):
         gift_url, gift_name = gift
         with db() as conn:
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS offer_drafts (
-                    draft_key TEXT PRIMARY KEY,
-                    connection_id TEXT NOT NULL,
-                    chat_id INTEGER NOT NULL,
-                    gift_url TEXT NOT NULL,
-                    gift_name TEXT NOT NULL,
-                    amount INTEGER,
-                    stage TEXT NOT NULL,
-                    updated_at INTEGER NOT NULL
-                )
-            """)
-            conn.execute("""
                 INSERT INTO offer_drafts
-                (draft_key, connection_id, chat_id, gift_url, gift_name, amount, stage, updated_at)
-                VALUES (?, ?, ?, ?, ?, NULL, 'amount', ?)
+                (draft_key, connection_id, chat_id, gift_url, gift_name, amount, stage, updated_at, source_message_ids)
+                VALUES (?, ?, ?, ?, ?, NULL, 'amount', ?, ?)
                 ON CONFLICT(draft_key) DO UPDATE SET
                     gift_url=excluded.gift_url, gift_name=excluded.gift_name,
-                    amount=NULL, stage='amount', updated_at=excluded.updated_at
-            """, (key, connection_id, chat_id, gift_url, gift_name, int(time.time())))
+                    amount=NULL, stage='amount', updated_at=excluded.updated_at,
+                    source_message_ids=excluded.source_message_ids
+            """, (key, connection_id, chat_id, gift_url, gift_name,
+                  int(time.time()), json.dumps([message.get("message_id")])))
             conn.commit()
         send_message(chat_id, "Ссылка на NFT получена. Теперь отправь сумму в Stars отдельным сообщением, например: 2300", connection_id)
         return
 
     with db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS offer_drafts (
-                draft_key TEXT PRIMARY KEY,
-                connection_id TEXT NOT NULL,
-                chat_id INTEGER NOT NULL,
-                gift_url TEXT NOT NULL,
-                gift_name TEXT NOT NULL,
-                amount INTEGER,
-                stage TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            )
-        """)
         draft = conn.execute("SELECT * FROM offer_drafts WHERE draft_key=?", (key,)).fetchone()
 
     if not draft:
@@ -326,8 +332,10 @@ def handle_business_message(message):
             return
         amount = int(text)
         with db() as conn:
-            conn.execute("UPDATE offer_drafts SET amount=?, stage='language', updated_at=? WHERE draft_key=?",
-                         (amount, int(time.time()), key))
+            source_ids = json.loads(draft["source_message_ids"] or "[]")
+            source_ids.append(message.get("message_id"))
+            conn.execute("UPDATE offer_drafts SET amount=?, stage='language', updated_at=?, source_message_ids=? WHERE draft_key=?",
+                         (amount, int(time.time()), json.dumps(source_ids), key))
             conn.commit()
         send_message(chat_id, "Сумма получена. Теперь отправь язык оффера: ru, en или zh", connection_id)
         return
@@ -337,7 +345,9 @@ def handle_business_message(message):
         if language not in TEXTS:
             send_message(chat_id, "Укажи язык одним из вариантов: ru, en или zh", connection_id)
             return
-        create_offer(message, connection_id, draft["gift_url"], int(draft["amount"]), language, draft["gift_name"])
+        source_ids = json.loads(draft["source_message_ids"] or "[]")
+        source_ids.append(message.get("message_id"))
+        create_offer(message, connection_id, draft["gift_url"], int(draft["amount"]), language, draft["gift_name"], source_ids)
         with db() as conn:
             conn.execute("DELETE FROM offer_drafts WHERE draft_key=?", (key,))
             conn.commit()
@@ -353,8 +363,11 @@ def handle_callback(query):
     chat_id = (msg.get("chat") or {}).get("id")
     with db() as conn:
         offer = conn.execute("SELECT * FROM offers WHERE id=?", (offer_id,)).fetchone()
-        if not offer or int(chat_id or 0) != int(offer["chat_id"]):
-            api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Offer not found"})
+        callback_message_id = msg.get("message_id")
+        if (not offer or
+                (callback_message_id is not None and int(callback_message_id) != int(offer["message_id"]))):
+            log.warning("Offer lookup failed: id=%s message_id=%s", offer_id, callback_message_id)
+            api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Предложение не найдено"})
             return
         strings = TEXTS[offer["language"]]
         status = offer["status"]
@@ -384,13 +397,20 @@ def handle_callback(query):
 
     api("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
-        api("editMessageText", {
+        edit_method = "editMessageCaption" if msg.get("photo") else "editMessageText"
+        edit_payload = {
             "business_connection_id": offer["connection_id"],
             "chat_id": offer["chat_id"],
             "message_id": msg.get("message_id") or offer["message_id"],
-            "text": body, "parse_mode": "HTML", "disable_web_page_preview": True,
+            "parse_mode": "HTML",
             "reply_markup": keyboard
-        })
+        }
+        if msg.get("photo"):
+            edit_payload["caption"] = body
+        else:
+            edit_payload["text"] = body
+            edit_payload["link_preview_options"] = {"is_disabled": True}
+        api(edit_method, edit_payload)
     except Exception:
         log.exception("Could not update offer message %s", offer_id)
 
