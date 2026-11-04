@@ -35,10 +35,10 @@ log = logging.getLogger("nft-offers")
 
 TEXTS = {
     "ru": {
-        "offer": "{seller} готов приобрести подарок\n<a href=\"{url}\">{gift}</a>.\n\nПредложенная сумма: <b>{amount}⭐️</b>\nПодтвердите передачу, если условия вам подходят.",
+        "offer": "{seller} готов приобрести подарок\n<a href=\"{url}\">{gift}</a>.\n\nПредложенная сумма: <b>{amount_display}</b>\nПодтвердите передачу, если условия вам подходят.",
         "accept": "Принять",
         "decline": "Отклонить",
-        "accepted": "Продавец принял предложение по подарку <a href=\"{gift_url}\">{gift}</a> на сумму {amount}⭐️.\n\nЭто подтверждение согласия продавца, а не резервирование или перевод Stars. Передавайте подарок только после самостоятельной проверки условий.",
+        "accepted": "Продавец принял предложение по подарку <a href=\"{gift_url}\">{gift}</a> на сумму {amount_display}.\n\nЭто подтверждение согласия продавца, а не резервирование или перевод Stars. Передавайте подарок только после самостоятельной проверки условий.",
         "declined": "❌ Продавец отклонил предложение по подарку {gift}.",
         "transfer_link": "Передать подарок",
         "confirm_transfer": "Подтвердить передачу",
@@ -50,10 +50,10 @@ TEXTS = {
         "help": "Бот работает в подключённых чатах Telegram Business. Отправьте в чате с продавцом одну строку:\n<code>https://t.me/nft/SnoopCigar-84846 2300 ru</code>\n\nСначала подключите бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты и разрешите ему получать и отправлять сообщения."
     },
     "en": {
-        "offer": "{seller} is interested in purchasing this gift\n<a href=\"{url}\">{gift}</a>.\n\nOffer amount: <b>{amount}⭐️</b>\nAccept the offer if these terms work for you.",
+        "offer": "{seller} is interested in purchasing this gift\n<a href=\"{url}\">{gift}</a>.\n\nOffer amount: <b>{amount_display}</b>\nAccept the offer if these terms work for you.",
         "accept": "Accept",
         "decline": "Decline",
-        "accepted": "The seller accepted the offer for <a href=\"{gift_url}\">{gift}</a> at {amount}⭐️.\n\nThis confirms the seller's acceptance only. It does not reserve or transfer Stars. Verify the terms and payment independently before transferring the gift.",
+        "accepted": "The seller accepted the offer for <a href=\"{gift_url}\">{gift}</a> at {amount_display}.\n\nThis confirms the seller's acceptance only. It does not reserve or transfer Stars. Verify the terms and payment independently before transferring the gift.",
         "declined": "❌ The seller declined the offer for {gift}.",
         "transfer_link": "Transfer the gift",
         "confirm_transfer": "Confirm transfer",
@@ -65,10 +65,10 @@ TEXTS = {
         "help": "Use this bot in a connected Telegram Business chat. Send one line in the seller's chat:\n<code>https://t.me/nft/SnoopCigar-84846 2300 en</code>\n\nConnect the bot in Telegram → Settings → Telegram Business → Chatbots and grant permission to receive and send messages."
     },
     "zh": {
-        "offer": "{seller} 有意购买这份礼物\n<a href=\"{url}\">{gift}</a>。\n\n报价：<b>{amount}⭐️</b>\n如果您接受此条件，请确认。",
+        "offer": "{seller} 有意购买这份礼物\n<a href=\"{url}\">{gift}</a>。\n\n报价：<b>{amount_display}</b>\n如果您接受此条件，请确认。",
         "accept": "接受",
         "decline": "拒绝",
-        "accepted": "卖家已接受 <a href=\"{gift_url}\">{gift}</a> 的报价：{amount}⭐️。\n\n这仅表示卖家接受报价，并不代表 Stars 已被托管或转账。转移礼物前，请自行核实付款和交易条件。",
+        "accepted": "卖家已接受 <a href=\"{gift_url}\">{gift}</a> 的报价：{amount_display}。\n\n这仅表示卖家接受报价，并不代表 Stars 已被托管或转账。转移礼物前，请自行核实付款和交易条件。",
         "declined": "❌ 卖家拒绝了 {gift} 的报价。",
         "transfer_link": "转移礼物",
         "confirm_transfer": "确认已转移",
@@ -101,6 +101,9 @@ def db():
             created_at INTEGER NOT NULL
         )
     """)
+    offer_columns = {row["name"] for row in conn.execute("PRAGMA table_info(offers)")}
+    if "currency" not in offer_columns:
+        conn.execute("ALTER TABLE offers ADD COLUMN currency TEXT NOT NULL DEFAULT 'stars'")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS access_requests (
             user_id INTEGER PRIMARY KEY,
@@ -253,15 +256,25 @@ def delete_source_messages(connection_id, chat_id, message_ids):
 
 def parse_offer(text):
     parts = (text or "").strip().split()
-    if len(parts) != 3:
+    if len(parts) == 3:
+        url, amount_text, language = parts
+        currency = "stars"
+    elif len(parts) == 4:
+        url, amount_text, currency, language = parts
+        currency = currency.lower()
+    else:
         return None
-    url, amount_text, language = parts
     language = language.lower()
-    if language not in TEXTS:
+    aliases = {
+        "star": "stars", "stars": "stars", "⭐": "stars",
+        "gram": "gram", "grams": "gram",
+        "rub": "rub", "ruble": "rub", "rubles": "rub",
+        "руб": "rub", "рубли": "rub"
+    }
+    currency = aliases.get(currency)
+    if currency not in ("stars", "gram", "rub") or language not in TEXTS:
         return None
     if not re.fullmatch(r"[1-9][0-9]{0,7}", amount_text):
-        return None
-    if amount_text.startswith("0"):
         return None
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.netloc.lower() not in ("t.me", "www.t.me"):
@@ -270,7 +283,12 @@ def parse_offer(text):
     if not match:
         return None
     gift_name = format_gift_name(match.group(1))
-    return url, int(amount_text), language, gift_name
+    return url, int(amount_text), currency, language, gift_name
+
+
+def format_amount(amount, currency):
+    labels = {"stars": "⭐️ Stars", "gram": "GRAM", "rub": "₽"}
+    return f"{amount} {labels.get(currency, '⭐️ Stars')}"
 
 def format_gift_name(slug):
     value = re.sub(r"([a-z])([A-Z])", r"\1 \2", slug)
@@ -287,7 +305,7 @@ def parse_gift_url(value):
         return None
     return (value.strip(), format_gift_name(match.group(1)))
 
-def create_offer(message, connection_id, gift_url, amount, language, gift_name, source_message_ids=None):
+def create_offer(message, connection_id, gift_url, amount, language, gift_name, source_message_ids=None, currency="stars"):
     chat = message.get("chat", {})
     seller = html.escape(chat.get("first_name") or chat.get("title") or "Продавец")
     safe_gift = html.escape(gift_name)
@@ -301,16 +319,16 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
     }
     text_out = strings["offer"].format(
         seller=seller, url=html.escape(gift_url, quote=True),
-        gift=safe_gift, amount=amount
+        gift=safe_gift, amount_display=html.escape(format_amount(amount, currency))
     )
     sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
     with db() as conn:
         conn.execute(
             """INSERT INTO offers
-            (id, connection_id, chat_id, message_id, gift_url, gift_name, amount, language, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (id, connection_id, chat_id, message_id, gift_url, gift_name, amount, language, created_at, currency)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (offer_id, connection_id, chat["id"], sent["message_id"],
-             gift_url, gift_name, amount, language, int(time.time()))
+             gift_url, gift_name, amount, language, int(time.time()), currency)
         )
         conn.commit()
     log.info("Offer %s created in chat %s", offer_id, chat["id"])
@@ -373,9 +391,9 @@ def handle_business_message(message):
     # Keep the old compact syntax working: URL amount language.
     parsed = parse_offer(text)
     if parsed:
-        gift_url, amount, language, gift_name = parsed
+        gift_url, amount, currency, language, gift_name = parsed
         try:
-            create_offer(message, connection_id, gift_url, amount, language, gift_name, [message.get("message_id")])
+            create_offer(message, connection_id, gift_url, amount, language, gift_name, [message.get("message_id")], currency)
         except Exception:
             log.exception("One-line offer creation failed: language=%s chat_id=%s", language, chat_id)
             send_message(chat_id, "❌ Не удалось отправить оффер. Ошибка записана в журнал Render. Попробуйте ещё раз.", connection_id)
@@ -556,11 +574,11 @@ def handle_malik_callback(query, data, actor_id):
 
     elif data == "malik:offers":
         with db() as conn:
-            rows = conn.execute("SELECT id, chat_id, gift_name, amount, language, status FROM offers ORDER BY created_at DESC LIMIT 20").fetchall()
+            rows = conn.execute("SELECT id, chat_id, gift_name, amount, currency, language, status FROM offers ORDER BY created_at DESC LIMIT 20").fetchall()
         body = "🎁 <b>Последние офферы</b>\nНажмите на оффер для просмотра:"
         buttons = []
         for row in rows:
-            label = f'{row["gift_name"]} · {row["amount"]}⭐ · {row["status"]}'
+            label = f'{row["gift_name"]} · {format_amount(row["amount"], row["currency"])} · {row["status"]}'
             buttons.append([{"text": label[:60], "callback_data": f'malik:o:{row["id"]}'}])
         if not buttons:
             body += "\nОфферов пока нет."
@@ -578,7 +596,7 @@ def handle_malik_callback(query, data, actor_id):
             body = (f"🎁 <b>{html.escape(offer['gift_name'])}</b>\n"
                     f"ID оффера: <code>{offer_id}</code>\n"
                     f"Пользователь: <code>{offer['chat_id']}</code>\n"
-                    f"Сумма: <b>{offer['amount']}⭐</b>\n"
+                    f"Сумма: <b>{html.escape(format_amount(offer['amount'], offer['currency']))}</b>\n"
                     f"Язык: {offer['language']}\nСтатус: {html.escape(offer['status'])}\n"
                     f'<a href="{html.escape(offer["gift_url"], quote=True)}">Открыть подарок</a>')
             keyboard = {"inline_keyboard": [
@@ -751,7 +769,7 @@ def handle_callback(query):
 
         if action == "accept":
             conn.execute("UPDATE offers SET status='accepted' WHERE id=? AND status='pending'", (offer_id,))
-            body = strings["accepted"].format(gift=html.escape(offer["gift_name"]), gift_url=html.escape(offer["gift_url"], quote=True), amount=offer["amount"])
+            body = strings["accepted"].format(gift=html.escape(offer["gift_name"]), gift_url=html.escape(offer["gift_url"], quote=True), amount_display=html.escape(format_amount(offer["amount"], offer["currency"])))
             keyboard = {"inline_keyboard": [
                 [{"text": strings["transfer_link"], "url": TRANSFER_URL}],
                 [{"text": strings["confirm_transfer"], "callback_data": f"transfer:{offer_id}"}]
@@ -767,13 +785,13 @@ def handle_callback(query):
         conn.commit()
 
     if action == "accept":
-        notify_admin(f"✅ <b>Оффер принят</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\nСумма: {offer['amount']}⭐️\nID: <code>{offer_id}</code>")
+        notify_admin(f"✅ <b>Оффер принят</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\nСумма: {html.escape(format_amount(offer['amount'], offer['currency']))}\nID: <code>{offer_id}</code>")
     elif action == "decline":
-        notify_admin(f"❌ <b>Оффер отклонён</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\nСумма: {offer['amount']}⭐️\nID: <code>{offer_id}</code>")
+        notify_admin(f"❌ <b>Оффер отклонён</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\nСумма: {html.escape(format_amount(offer['amount'], offer['currency']))}\nID: <code>{offer_id}</code>")
     else:
         notify_admin(
             f"📩 <b>Пользователь подтвердил передачу</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\n"
-            f"Сумма: {offer['amount']}⭐️\nID: <code>{offer_id}</code>\nПодтвердить передачу?",
+            f"Сумма: {html.escape(format_amount(offer['amount'], offer['currency']))}\nID: <code>{offer_id}</code>\nПодтвердить передачу?",
             {"inline_keyboard": [[
                 {"text": "✅ Принять", "callback_data": f"transfer_approve:{offer_id}"},
                 {"text": "❌ Отклонить", "callback_data": f"transfer_reject:{offer_id}"}
