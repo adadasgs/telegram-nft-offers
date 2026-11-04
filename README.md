@@ -1,49 +1,31 @@
 # Telegram NFT Offers
 
-Telegram Business bot for sending custom NFT gift-offer messages in seller chats.
+Telegram Business bot for sending formatted NFT gift offer messages.
 
-## Command
+## Command format
 
-Send this one line in the seller's private chat from the connected Business account:
+`https://t.me/nft/SnoopCigar-84846 2300 ru`
 
-```
-https://t.me/nft/SnoopCigar-84846 2300 ru
-```
+The last value selects the language (`ru`, `en`, or `zh`). The bot accepts Telegram collectible gift links in the form `https://t.me/nft/<gift-id>` and a positive whole-number Stars amount.
 
-Supported language codes: `ru`, `en`, `zh`. The bot accepts any Telegram collectible-gift link in the form `https://t.me/nft/<gift-slug>` and a positive Stars amount.
+## Deploy on Render
 
-## Features
+1. Create a **Web Service** from this repository (or deploy the Blueprint in `render.yaml`).
+2. Build command: `pip install -r requirements.txt`
+3. Start command: `python bot.py`
+4. Add `BOT_TOKEN` in Render → Environment. Get the token from @BotFather. Never put it in GitHub or this chat.
+5. Deploy, then open `/health` on the Render service URL.
 
-- Sends the offer from the connected Telegram Business account.
-- Adds **Accept** and **Decline** inline buttons.
-- On acceptance, shows a link to `@Autooffersgift` and a **Confirm transfer** button.
-- Stores offer status in SQLite.
-- Includes a health endpoint for Render.
+The included Blueprint uses Render's free plan and stores offer state in `/tmp`. That storage is temporary: pending offers may be lost when Render restarts or redeploys the service. For persistent offer history, use a paid Render persistent disk and set `DB_PATH=/var/data/offers.sqlite3` with the disk mounted at `/var/data`.
 
-## Important limitation
+## Connect Telegram Business
 
-These are custom offer messages, **not Telegram's official protected Gift Offers**. Telegram's official `payments.sendStarGiftOffer` method is available only to user accounts, not bots. This bot does not reserve, hold, or automatically pay Stars and cannot independently verify an NFT transfer. A “transfer confirmed” status only records that a participant pressed the button; verify ownership and payment separately.
+In Telegram, open **Settings → Telegram Business → Chatbots**, connect this bot, and allow it to receive and send messages in the seller chats where you want to use it. Then open a seller's private chat from your Business account and send the command line there.
 
-## Deploy to Render
+## Payment limitation
 
-The included `render.yaml` creates a Python web service with a persistent disk. The Render `starter` instance and persistent disk are paid features.
+The **Accept** button records that the seller accepted the custom offer. It does not reserve, hold, collect, or transfer Telegram Stars and does not verify that a gift was transferred. The **Confirm transfer** button only records that a participant marked the transfer as completed. Buyer and seller must verify payment and gift transfer independently. This is not an official Telegram escrow or official Telegram Gift Offer.
 
-1. Create a bot with [@BotFather](https://t.me/BotFather).
-2. Enable Business Mode for the bot in BotFather, if it is not already enabled.
-3. In Render, create a new service from this repository (or use the Blueprint from `render.yaml`).
-4. Use these commands if configuring manually:
-   - Build: `pip install -r requirements.txt`
-   - Start: `python bot.py`
-5. Add the environment variable `BOT_TOKEN` with your BotFather token. Never commit the token to GitHub or send it in chat.
-6. Deploy and wait for the service health check to pass.
-7. In Telegram, open **Settings → Telegram Business → Chatbots**, connect the bot, and allow it to reply in the relevant private chats.
-8. In a seller's private chat, send the command above from the connected Business account.
+## Security
 
-## Render environment
-
-The Blueprint configures:
-- `BOT_TOKEN` — add this secret manually in Render.
-- `DB_PATH=/var/data/offers.sqlite3` — SQLite database on the persistent disk.
-- `TRANSFER_URL=https://t.me/Autooffersgift` — destination link shown after acceptance.
-
-Do not paste the bot token into source files.
+Never commit the bot token. Set it only as the `BOT_TOKEN` environment variable in Render. If a token is exposed, revoke it through @BotFather and create a new one.
