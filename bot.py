@@ -407,6 +407,7 @@ def handle_private_message(message):
 def handle_callback(query):
     data = query.get("data", "")
     actor_id = (query.get("from") or {}).get("id")
+    log.info("Callback received: data=%s actor_id=%s", data, actor_id)
     access_match = re.fullmatch(r"(request_access|access_approve|access_decline):([0-9]{1,20})", data)
     review_match = re.fullmatch(r"(transfer_approve|transfer_reject):([a-f0-9]{12})", data)
     offer_match = re.fullmatch(r"(accept|decline|transfer):([a-f0-9]{12})", data)
@@ -443,6 +444,7 @@ def handle_callback(query):
                 pass
             return
         if actor_id != ADMIN_ID:
+            log.warning("Unauthorized access review: actor=%s target=%s", actor_id, target_id)
             api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Только администратор может решать заявки", "show_alert": True})
             return
         new_status = "approved" if action == "access_approve" else "rejected"
@@ -487,9 +489,11 @@ def handle_callback(query):
         return
 
     if not offer_match:
+        log.warning("Unknown callback data: %s", data)
         api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Неизвестное действие"})
         return
     action, offer_id = offer_match
+    log.info("Offer callback action=%s offer_id=%s", action, offer_id)
     msg = query.get("message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
     with db() as conn:
