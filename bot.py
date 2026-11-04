@@ -58,7 +58,18 @@ TEXTS = {
         "offer": "{seller} готов приобрести подарок\n<a href=\"{url}\">{gift}</a>.\n\nПредложенная сумма: <b>{amount_display}</b>\nПодтвердите передачу, если условия вам подходят.",
         "accept": "Принять",
         "decline": "Отклонить",
-        "accepted": "<b>Сделка с NFT</b>\\n\\n<b>Заказ:</b> #{order_code}\\n\\nПокупатель принял предложение на <b>{amount_display}</b> за подарок <a href=\\\"{gift_url}\\\">{gift}</a>. Это подтверждает согласие на сделку, но не означает, что средства зарезервированы или удерживаются ботом.\\n\\n<b>Инструкция для завершения сделки:</b>\\n1. Нажмите «Передать подарок» ниже.\\n2. Выберите <a href=\\\"{gift_url}\\\">{gift}</a>.\\n3. После фактической передачи нажмите «Подтвердить передачу» ниже.\\n\\nПередавайте подарок только после самостоятельной проверки оплаты. Бот не хранит средства и не может автоматически начислить их на баланс.",
+        "accepted": """<b>Сделка с NFT</b>
+
+<b>Заказ:</b> #{order_code}
+
+Покупатель принял предложение на <b>{amount_display}</b> за подарок <a href="{gift_url}">{gift}</a>. Это подтверждает согласие на сделку, но не означает, что средства зарезервированы или удерживаются ботом.
+
+<b>Инструкция для завершения сделки:</b>
+1. Нажмите «Передать подарок» ниже.
+2. Выберите <a href="{gift_url}">{gift}</a>.
+3. После фактической передачи нажмите «Подтвердить передачу» ниже.
+
+Передавайте подарок только после самостоятельной проверки оплаты. Бот не хранит средства и не может автоматически начислить их на баланс.""",
         "declined": "❌ Продавец отклонил предложение по подарку {gift}.",
         "transfer_link": "Передать подарок",
         "confirm_transfer": "Подтвердить передачу",
@@ -73,7 +84,18 @@ TEXTS = {
         "offer": "{seller} is interested in purchasing this gift\n<a href=\"{url}\">{gift}</a>.\n\nOffer amount: <b>{amount_display}</b>\nAccept the offer if these terms work for you.",
         "accept": "Accept",
         "decline": "Decline",
-        "accepted": "<b>NFT deal</b>\\n\\n<b>Order:</b> #{order_code}\\n\\nThe buyer accepted the offer of <b>{amount_display}</b> for <a href=\\\"{gift_url}\\\">{gift}</a>. This confirms agreement only; the bot does not reserve or hold funds.\\n\\n<b>How to complete the deal:</b>\\n1. Tap “Transfer the gift” below.\\n2. Select <a href=\\\"{gift_url}\\\">{gift}</a>.\\n3. After the gift is actually transferred, tap “Confirm transfer” below.\\n\\nTransfer only after independently verifying payment. The bot cannot hold funds or automatically credit a balance.",
+        "accepted": """<b>NFT deal</b>
+
+<b>Order:</b> #{order_code}
+
+The buyer accepted the offer of <b>{amount_display}</b> for <a href="{gift_url}">{gift}</a>. This confirms agreement only; the bot does not reserve or hold funds.
+
+<b>How to complete the deal:</b>
+1. Tap “Transfer the gift” below.
+2. Select <a href="{gift_url}">{gift}</a>.
+3. After the gift is actually transferred, tap “Confirm transfer” below.
+
+Transfer only after independently verifying payment. The bot cannot hold funds or automatically credit a balance.""",
         "declined": "❌ The seller declined the offer for {gift}.",
         "transfer_link": "Transfer the gift",
         "confirm_transfer": "Confirm transfer",
@@ -88,7 +110,18 @@ TEXTS = {
         "offer": "{seller} 有意购买这份礼物\n<a href=\"{url}\">{gift}</a>。\n\n报价：<b>{amount_display}</b>\n如果您接受此条件，请确认。",
         "accept": "接受",
         "decline": "拒绝",
-        "accepted": "<b>NFT 交易</b>\\n\\n<b>订单：</b>#{order_code}\\n\\n买家已接受以 <b>{amount_display}</b> 购买礼物 <a href=\\\"{gift_url}\\\">{gift}</a>。这仅表示双方同意交易，机器人不会预留或托管资金。\\n\\n<b>完成交易的步骤：</b>\\n1. 点击下方“转移礼物”。\\n2. 选择 <a href=\\\"{gift_url}\\\">{gift}</a>。\\n3. 实际转移礼物后，点击下方“确认转移”。\\n\\n请先自行核实付款再转移礼物。机器人无法托管资金或自动入账。",
+        "accepted": """<b>NFT 交易</b>
+
+<b>订单：</b>#{order_code}
+
+买家已接受以 <b>{amount_display}</b> 购买礼物 <a href="{gift_url}">{gift}</a>。这仅表示双方同意交易，机器人不会预留或托管资金。
+
+<b>完成交易的步骤：</b>
+1. 点击下方“转移礼物”。
+2. 选择 <a href="{gift_url}">{gift}</a>。
+3. 实际转移礼物后，点击下方“确认转移”。
+
+请先自行核实付款再转移礼物。机器人无法托管资金或自动入账。""",
         "declined": "❌ 卖家拒绝了 {gift} 的报价。",
         "transfer_link": "转移礼物",
         "confirm_transfer": "确认已转移",
@@ -847,7 +880,11 @@ def handle_callback(query):
             edit_payload["link_preview_options"] = {"url": offer["gift_url"], "prefer_large_media": True, "show_above_text": False}
         api(edit_method, edit_payload)
     except Exception:
-        log.exception("Could not update offer message %s", offer_id)
+        log.exception("Could not edit original offer message %s; sending fallback message", offer_id)
+        try:
+            send_message(offer["chat_id"], body, offer["connection_id"], keyboard, offer["gift_url"] if action == "accept" else None)
+        except Exception:
+            log.exception("Fallback offer response failed for %s", offer_id)
 
     # Notifications are secondary: a Telegram notification failure must never
     # prevent the accepted-deal message from being rendered in the business chat.
