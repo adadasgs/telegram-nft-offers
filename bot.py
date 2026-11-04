@@ -95,7 +95,7 @@ def get_texts(language):
         return _TRANSLATED_TEXTS[language]
 
     translated = {}
-    token_pattern = re.compile(r"(<[^>]+>|\\{[a-z_]+\\})")
+    token_pattern = re.compile(r"(<[^>]+>|\{[a-z_]+\})")
     for key, source in TEXTS["ru"].items():
         tokens = []
         def protect(match):
