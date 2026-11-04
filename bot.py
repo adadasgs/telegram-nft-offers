@@ -450,8 +450,174 @@ def notify_admin(text, reply_markup=None):
     except Exception:
         log.exception("Could not notify admin")
 
+def malik_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "👥 Пользователи", "callback_data": "malik:users"}],
+        [{"text": "🎁 Офферы", "callback_data": "malik:offers"}]
+    ]}
+
+
+def malik_screen(chat_id, message_id, text, keyboard):
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": keyboard
+    }
+    return api("editMessageText", payload)
+
+
+def handle_malik_callback(query, data, actor_id):
+    if not data.startswith("malik:"):
+        return False
+    if actor_id != ADMIN_ID:
+        api("answerCallbackQuery", {
+            "callback_query_id": query["id"],
+            "text": "Нет доступа",
+            "show_alert": True
+        })
+        return True
+
+    msg = query.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    message_id = msg.get("message_id")
+    if not chat_id or not message_id:
+        api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Не удалось открыть панель"})
+        return True
+
+    parts = data.split(":")
+    screen = "home"
+    body = "⚙️ <b>Malik — панель управления</b>\\nВыберите раздел:"
+    keyboard = malik_keyboard()
+
+    if data == "malik:users":
+        screen = "users"
+        with db() as conn:
+            rows = conn.execute("""
+                SELECT user_id AS uid, status,
+                       COALESCE(first_name, '') AS first_name,
+                       COALESCE(username, '') AS username
+                FROM access_requests
+                ORDER BY updated_at DESC LIMIT 30
+            """).fetchall()
+            offer_users = conn.execute("""
+                SELECT chat_id AS uid, COUNT(*) AS offer_count
+                FROM offers GROUP BY chat_id ORDER BY MAX(created_at) DESC LIMIT 30
+            """).fetchall()
+        users = {}
+        for row in rows:
+            users[int(row["uid"])] = {
+                "status": row["status"],
+                "name": row["first_name"] or (("@" + row["username"]) if row["username"] else "Пользователь"),
+                "offers": 0
+            }
+        for row in offer_users:
+            uid = int(row["uid"])
+            if uid not in users:
+                users[uid] = {"status": "есть офферы", "name": "Пользователь", "offers": int(row["offer_count"])}
+            else:
+                users[uid]["offers"] = int(row["offer_count"])
+        body = "👥 <b>Пользователи</b>\\nНажмите на пользователя для управления:"
+        buttons = []
+        for uid, item in list(users.items())[:30]:
+            label = f'{item["name"]} · {uid} · офферов: {item["offers"]}'
+            buttons.append([{"text": label[:60], "callback_data": f"malik:u:{uid}"}])
+        if not buttons:
+            body += "\\nПока пользователей нет."
+        buttons.append([{"text": "⬅️ Назад", "callback_data": "malik:home"}])
+        keyboard = {"inline_keyboard": buttons}
+
+    elif len(parts) == 3 and parts[1] == "u" and parts[2].isdigit():
+        uid = int(parts[2])
+        with db() as conn:
+            access = conn.execute("SELECT status, first_name, username FROM access_requests WHERE user_id=?", (uid,)).fetchone()
+            count = conn.execute("SELECT COUNT(*) AS n FROM offers WHERE chat_id=?", (uid,)).fetchone()["n"]
+        label = (access["first_name"] if access else None) or (("@" + access["username"]) if access and access["username"] else "Пользователь")
+        status = access["status"] if access else "нет заявки"
+        body = (f"👤 <b>{html.escape(label)}</b>\\nID: <code>{uid}</code>\\n"
+                f"Доступ: {html.escape(status)}\\nОфферов: {count}\\n\\n"
+                "Удаление пользователя удалит его заявки на доступ, черновики и офферы из базы бота.")
+        keyboard = {"inline_keyboard": [
+            [{"text": "🗑 Удалить пользователя и его офферы", "callback_data": f"malik:ud:{uid}"}],
+            [{"text": "⬅️ К пользователям", "callback_data": "malik:users"}]
+        ]}
+
+    elif len(parts) == 3 and parts[1] == "ud" and parts[2].isdigit():
+        uid = int(parts[2])
+        with db() as conn:
+            conn.execute("DELETE FROM offers WHERE chat_id=?", (uid,))
+            conn.execute("DELETE FROM offer_drafts WHERE chat_id=?", (uid,))
+            conn.execute("DELETE FROM access_requests WHERE user_id=?", (uid,))
+            conn.commit()
+        body = f"✅ Пользователь <code>{uid}</code> и связанные с ним данные удалены из базы бота."
+        keyboard = {"inline_keyboard": [[{"text": "⬅️ К пользователям", "callback_data": "malik:users"}],
+                                        [{"text": "🏠 В меню", "callback_data": "malik:home"}]]}
+
+    elif data == "malik:offers":
+        with db() as conn:
+            rows = conn.execute("SELECT id, chat_id, gift_name, amount, language, status FROM offers ORDER BY created_at DESC LIMIT 20").fetchall()
+        body = "🎁 <b>Последние офферы</b>\\nНажмите на оффер для просмотра:"
+        buttons = []
+        for row in rows:
+            label = f'{row["gift_name"]} · {row["amount"]}⭐ · {row["status"]}'
+            buttons.append([{"text": label[:60], "callback_data": f'malik:o:{row["id"]}'}])
+        if not buttons:
+            body += "\\nОфферов пока нет."
+        buttons.append([{"text": "⬅️ Назад", "callback_data": "malik:home"}])
+        keyboard = {"inline_keyboard": buttons}
+
+    elif len(parts) == 3 and parts[1] == "o" and re.fullmatch(r"[a-f0-9]{12}", parts[2]):
+        offer_id = parts[2]
+        with db() as conn:
+            offer = conn.execute("SELECT * FROM offers WHERE id=?", (offer_id,)).fetchone()
+        if not offer:
+            body = "Оффер уже не найден."
+            keyboard = {"inline_keyboard": [[{"text": "⬅️ К офферам", "callback_data": "malik:offers"}]]}
+        else:
+            body = (f"🎁 <b>{html.escape(offer['gift_name'])}</b>\\n"
+                    f"ID оффера: <code>{offer_id}</code>\\n"
+                    f"Пользователь: <code>{offer['chat_id']}</code>\\n"
+                    f"Сумма: <b>{offer['amount']}⭐</b>\\n"
+                    f"Язык: {offer['language']}\\nСтатус: {html.escape(offer['status'])}\\n"
+                    f'<a href="{html.escape(offer["gift_url"], quote=True)}">Открыть подарок</a>')
+            keyboard = {"inline_keyboard": [
+                [{"text": "🗑 Удалить оффер", "callback_data": f"malik:od:{offer_id}"}],
+                [{"text": "⬅️ К офферам", "callback_data": "malik:offers"}]
+            ]}
+
+    elif len(parts) == 3 and parts[1] == "od" and re.fullmatch(r"[a-f0-9]{12}", parts[2]):
+        offer_id = parts[2]
+        with db() as conn:
+            conn.execute("DELETE FROM offers WHERE id=?", (offer_id,))
+            conn.commit()
+        body = f"✅ Оффер <code>{offer_id}</code> удалён из базы бота."
+        keyboard = {"inline_keyboard": [[{"text": "⬅️ К офферам", "callback_data": "malik:offers"}],
+                                        [{"text": "🏠 В меню", "callback_data": "malik:home"}]]}
+
+    elif data != "malik:home":
+        body = "Неизвестный раздел."
+        keyboard = malik_keyboard()
+
+    try:
+        malik_screen(chat_id, message_id, body, keyboard)
+    except Exception:
+        log.exception("Could not update Malik admin panel")
+    api("answerCallbackQuery", {"callback_query_id": query["id"]})
+    return True
+
+
 def handle_private_message(message):
     text = (message.get("text") or "").strip()
+    user = message.get("from") or {}
+    user_id = user.get("id")
+    if text.split()[0].split("@")[0] == "/malik":
+        if user_id != ADMIN_ID:
+            if user_id:
+                send_message(user_id, "⛔ Нет доступа к этой команде.")
+            return
+        send_message(user_id, "⚙️ <b>Malik — панель управления</b>\\nВыберите раздел:", reply_markup=malik_keyboard())
+        return
     if not text.startswith("/start"):
         return
     user = message.get("from") or {}
@@ -477,6 +643,8 @@ def handle_callback(query):
     data = query.get("data", "")
     actor_id = (query.get("from") or {}).get("id")
     log.info("Callback received: data=%s actor_id=%s", data, actor_id)
+    if handle_malik_callback(query, data, actor_id):
+        return
     access_match = re.fullmatch(r"(request_access|access_approve|access_decline):([0-9]{1,20})", data)
     review_match = re.fullmatch(r"(transfer_approve|transfer_reject):([a-f0-9]{12})", data)
     offer_match = re.fullmatch(r"(accept|decline|transfer):([a-f0-9]{12})", data)
