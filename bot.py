@@ -190,15 +190,22 @@ def send_offer_card(chat_id, caption, connection_id, reply_markup, gift_url):
     return send_message(chat_id, caption, connection_id, reply_markup, gift_url)
 
 def delete_source_messages(connection_id, chat_id, message_ids):
-    for message_id in message_ids or []:
-        try:
-            api("deleteMessage", {
-                "business_connection_id": connection_id,
-                "chat_id": chat_id,
-                "message_id": int(message_id)
-            })
-        except Exception as exc:
-            log.warning("Could not delete source message %s: %s", message_id, exc)
+    # Business chats must use deleteBusinessMessages, not deleteMessage.
+    ids = sorted({int(message_id) for message_id in (message_ids or []) if message_id})
+    if not ids:
+        return
+    try:
+        api("deleteBusinessMessages", {
+            "business_connection_id": connection_id,
+            "message_ids": ids
+        })
+        log.info("Deleted source messages in business chat %s: %s", chat_id, ids)
+    except Exception:
+        log.exception(
+            "Could not delete source messages in business chat %s. "
+            "Check that the connected bot has can_delete_all_messages permission.",
+            chat_id
+        )
 
 def parse_offer(text):
     parts = (text or "").strip().split()
