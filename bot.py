@@ -319,7 +319,11 @@ def handle_business_message(message):
     parsed = parse_offer(text)
     if parsed:
         gift_url, amount, language, gift_name = parsed
-        create_offer(message, connection_id, gift_url, amount, language, gift_name, [message.get("message_id")])
+        try:
+            create_offer(message, connection_id, gift_url, amount, language, gift_name, [message.get("message_id")])
+        except Exception:
+            log.exception("One-line offer creation failed: language=%s chat_id=%s", language, chat_id)
+            send_message(chat_id, "❌ Не удалось отправить оффер. Ошибка записана в журнал Render. Попробуйте ещё раз.", connection_id)
         return
 
     # New step-by-step syntax: URL -> amount -> language.
@@ -364,16 +368,26 @@ def handle_business_message(message):
         return
 
     if draft["stage"] == "language":
-        language = text.lower()
-        if language not in TEXTS:
-            send_message(chat_id, "Укажи язык одним из вариантов: ru, en или zh", connection_id)
+        language_input = text.strip().lower()
+        language_aliases = {
+            "ru": "ru", "рус": "ru", "русский": "ru", "russian": "ru",
+            "en": "en", "англ": "en", "английский": "en", "english": "en",
+            "zh": "zh", "cn": "zh", "中文": "zh", "китайский": "zh", "chinese": "zh"
+        }
+        language = language_aliases.get(language_input)
+        if not language:
+            send_message(chat_id, "Укажи язык: ru / en / zh (можно написать русский / английский / китайский)", connection_id)
             return
         source_ids = json.loads(draft["source_message_ids"] or "[]")
         source_ids.append(message.get("message_id"))
-        create_offer(message, connection_id, draft["gift_url"], int(draft["amount"]), language, draft["gift_name"], source_ids)
-        with db() as conn:
-            conn.execute("DELETE FROM offer_drafts WHERE draft_key=?", (key,))
-            conn.commit()
+        try:
+            create_offer(message, connection_id, draft["gift_url"], int(draft["amount"]), language, draft["gift_name"], source_ids)
+            with db() as conn:
+                conn.execute("DELETE FROM offer_drafts WHERE draft_key=?", (key,))
+                conn.commit()
+        except Exception:
+            log.exception("Offer creation failed: language=%s chat_id=%s", language, chat_id)
+            send_message(chat_id, "❌ Не удалось отправить оффер. Ошибка записана в журнал Render. Попробуйте ещё раз.", connection_id)
 
 def notify_admin(text, reply_markup=None):
     try:
