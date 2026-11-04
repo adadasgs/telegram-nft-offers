@@ -23,6 +23,9 @@ PREAPPROVED_OWNER_IDS = {8756303914}
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", hashlib.sha256(BOT_TOKEN.encode("utf-8")).hexdigest()[:40])
 PUBLIC_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
+API_LOCK = threading.RLock()
+SEEN_UPDATES = set()
+SEEN_UPDATES_LOCK = threading.Lock()
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -130,18 +133,40 @@ def api(method, payload=None):
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is not set")
     body = json.dumps(payload or {}).encode("utf-8")
-    req = Request(API + method, data=body, headers={"Content-Type": "application/json"})
-    try:
-        with urlopen(req, timeout=40) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"Telegram API HTTP {exc.code}: {detail}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"Telegram API connection error: {exc}") from exc
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegram API error: {data}")
-    return data.get("result")
+    # Serialize Telegram API calls and respect flood-control retry_after values.
+    for attempt in range(4):
+        with API_LOCK:
+            req = Request(API + method, data=body, headers={"Content-Type": "application/json"})
+            try:
+                with urlopen(req, timeout=40) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")
+                if exc.code == 429 and attempt < 3:
+                    try:
+                        error_data = json.loads(detail)
+                        wait_seconds = int((error_data.get("parameters") or {}).get("retry_after", 1))
+                    except (ValueError, TypeError):
+                        wait_seconds = 1
+                    wait_seconds = max(1, min(wait_seconds, 300))
+                    log.warning("Telegram rate limit on %s; retrying in %s seconds (attempt %s/4)",
+                                method, wait_seconds + 1, attempt + 1)
+                    time.sleep(wait_seconds + 1)
+                    continue
+                raise RuntimeError(f"Telegram API HTTP {exc.code}: {detail}") from exc
+            except URLError as exc:
+                raise RuntimeError(f"Telegram API connection error: {exc}") from exc
+            if not data.get("ok"):
+                if data.get("error_code") == 429 and attempt < 3:
+                    wait_seconds = int((data.get("parameters") or {}).get("retry_after", 1))
+                    wait_seconds = max(1, min(wait_seconds, 300))
+                    log.warning("Telegram rate limit on %s; retrying in %s seconds (attempt %s/4)",
+                                method, wait_seconds + 1, attempt + 1)
+                    time.sleep(wait_seconds + 1)
+                    continue
+                raise RuntimeError(f"Telegram API error: {data}")
+            return data.get("result")
+    raise RuntimeError(f"Telegram API rate limit persisted for {method}")
 
 def send_message(chat_id, text, connection_id=None, reply_markup=None, link_preview_url=None):
     payload = {
@@ -309,9 +334,30 @@ def handle_business_message(message):
     if owner_id not in PREAPPROVED_OWNER_IDS and owner_id != ADMIN_ID:
         with db() as conn:
             access = conn.execute("SELECT status FROM access_requests WHERE user_id=?", (owner_id,)).fetchone()
-        if not access or access["status"] != "approved":
-            log.info("Offer creation blocked for unapproved Business owner %s", owner_id)
-            return
+            if not access or access["status"] != "approved":
+                if not access or access["status"] != "pending":
+                    owner = connection.get("user") or {}
+                    conn.execute("""INSERT INTO access_requests
+                        (user_id, status, username, first_name, updated_at)
+                        VALUES (?, 'pending', ?, ?, ?)
+                        ON CONFLICT(user_id) DO UPDATE SET status='pending',
+                        username=excluded.username, first_name=excluded.first_name,
+                        updated_at=excluded.updated_at""",
+                        (owner_id, owner.get("username"), owner.get("first_name"), int(time.time())))
+                    conn.commit()
+                    notify_admin(
+                        "🆕 <b>Новая заявка на доступ к офферам</b>\n"
+                        "Бизнес-аккаунт попытался создать оффер.\n"
+                        f"Пользователь: {html.escape(owner.get('first_name') or 'Без имени')} "
+                        f"(@{html.escape(owner.get('username') or 'нет username')})\n"
+                        f"ID: <code>{owner_id}</code>",
+                        {"inline_keyboard": [[
+                            {"text": "✅ Принять", "callback_data": f"access_approve:{owner_id}"},
+                            {"text": "❌ Отклонить", "callback_data": f"access_decline:{owner_id}"}
+                        ]]}
+                    )
+                log.info("Offer creation blocked for unapproved Business owner %s", owner_id)
+                return
 
     chat = message.get("chat", {})
     if chat.get("type") != "private":
@@ -621,12 +667,26 @@ class HealthHandler(BaseHTTPRequestHandler):
             if length <= 0 or length > 2_000_000:
                 raise ValueError("Invalid webhook payload size")
             update = json.loads(self.rfile.read(length).decode("utf-8"))
+            update_id = update.get("update_id")
             update_type = next((key for key in ("callback_query", "business_message", "message", "business_connection") if key in update), "unknown")
-            log.info("Webhook update received: type=%s update_id=%s", update_type, update.get("update_id"))
-            process_update(update)
+            log.info("Webhook update received: type=%s update_id=%s", update_type, update_id)
+            if update_id is not None:
+                with SEEN_UPDATES_LOCK:
+                    if update_id in SEEN_UPDATES:
+                        self.send_response(200)
+                        self.end_headers()
+                        self.wfile.write(b"OK")
+                        return
+                    SEEN_UPDATES.add(update_id)
+                    if len(SEEN_UPDATES) > 10000:
+                        SEEN_UPDATES.clear()
+                        SEEN_UPDATES.add(update_id)
+            # Acknowledge Telegram immediately; long retry_after waits happen in a worker,
+            # not inside the webhook request where Telegram could time out and redeliver it.
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
+            threading.Thread(target=self.process_in_background, args=(update,), daemon=True).start()
         except Exception:
             log.exception("Webhook update processing failed")
             self.send_response(500)
@@ -643,6 +703,12 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def process_in_background(self, update):
+        try:
+            process_update(update)
+        except Exception:
+            log.exception("Background webhook update processing failed")
 
     def log_message(self, *_):
         return
