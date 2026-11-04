@@ -11,7 +11,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode
 from urllib.request import Request, urlopen
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -46,7 +46,7 @@ TEXTS = {
         "buyer_accept": "Вы приняли предложение. Отправьте подарок покупателю только после проверки условий и получения оплаты самостоятельно. Автоматического удержания или перевода Stars этот бот не выполняет.",
         "buyer_decline": "Вы отклонили предложение.",
         "expired": "Это предложение уже обработано.",
-        "bad": "Формат не распознан.\nОтправьте одной строкой:\nhttps://t.me/nft/SnoopCigar-84846 2300 ru\n\nПоследний параметр: ru, en или zh.",
+        "bad": "Формат не распознан.\nОтправьте одной строкой:\nhttps://t.me/nft/НазваниеПодарка-12345 2300 ru\n\nПоследний параметр: ISO-код языка, например ru, en, fr, de, es, ar, ja.",
         "help": "Бот работает в подключённых чатах Telegram Business. Отправьте в чате с продавцом одну строку:\n<code>https://t.me/nft/SnoopCigar-84846 2300 ru</code>\n\nСначала подключите бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты и разрешите ему получать и отправлять сообщения."
     },
     "en": {
@@ -61,7 +61,7 @@ TEXTS = {
         "buyer_accept": "You accepted the offer. Transfer the gift only after independently checking the terms and payment. This bot does not hold or automatically transfer Stars.",
         "buyer_decline": "You declined the offer.",
         "expired": "This offer has already been processed.",
-        "bad": "I couldn't parse that line.\nSend one line in this format:\nhttps://t.me/nft/SnoopCigar-84846 2300 en\n\nLanguage: ru, en, or zh.",
+        "bad": "I couldn't parse that line.\nSend one line in this format:\nhttps://t.me/nft/SnoopCigar-84846 2300 en\n\nUse an ISO language code, e.g. ru, en, fr, de, es, ar, ja.",
         "help": "Use this bot in a connected Telegram Business chat. Send one line in the seller's chat:\n<code>https://t.me/nft/SnoopCigar-84846 2300 en</code>\n\nConnect the bot in Telegram → Settings → Telegram Business → Chatbots and grant permission to receive and send messages."
     },
     "zh": {
@@ -76,10 +76,44 @@ TEXTS = {
         "buyer_accept": "您已接受报价。请先自行核实交易条件和付款，再转移礼物。本机器人不会托管或自动转账 Stars。",
         "buyer_decline": "您已拒绝报价。",
         "expired": "此报价已处理。",
-        "bad": "无法识别格式。\n请发送一行，格式如下：\nhttps://t.me/nft/SnoopCigar-84846 2300 zh\n\n语言代码：ru、en 或 zh。",
+        "bad": "无法识别格式。\n请发送一行，格式如下：\nhttps://t.me/nft/SnoopCigar-84846 2300 zh\n\n请使用语言代码，例如 ru、en、fr、de、es、ar、ja。",
         "help": "请在已连接的 Telegram Business 聊天中使用。向卖家发送一行：\n<code>https://t.me/nft/SnoopCigar-84846 2300 zh</code>\n\n在 Telegram → 设置 → Telegram Business → 聊天机器人中连接本机器人，并授予接收和发送消息的权限。"
     }
 }
+
+
+_TRANSLATED_TEXTS = {}
+
+def get_texts(language):
+    """Translate offer UI strings to any ISO 639 language code on demand."""
+    language = (language or "ru").lower().replace("_", "-")
+    if language in TEXTS:
+        return TEXTS[language]
+    if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2})?", language):
+        raise ValueError("Invalid ISO language code")
+    if language in _TRANSLATED_TEXTS:
+        return _TRANSLATED_TEXTS[language]
+
+    translated = {}
+    token_pattern = re.compile(r"(<[^>]+>|\\{[a-z_]+\\})")
+    for key, source in TEXTS["ru"].items():
+        tokens = []
+        def protect(match):
+            token = "ZXQKEEP" + str(len(tokens)) + "QXZ"
+            tokens.append((token, match.group(0)))
+            return token
+        protected = token_pattern.sub(protect, source)
+        query = urlencode({"client": "gtx", "sl": "ru", "tl": language.split("-")[0], "dt": "t", "q": protected})
+        request = Request("https://translate.googleapis.com/translate_a/single?" + query,
+                          headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(request, timeout=12) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        result = "".join(part[0] for part in payload[0] if part and part[0])
+        for token, original in tokens:
+            result = result.replace(token, original)
+        translated[key] = result
+    _TRANSLATED_TEXTS[language] = translated
+    return translated
 
 def db():
     folder = os.path.dirname(DB_PATH)
@@ -272,9 +306,9 @@ def parse_offer(text):
         "руб": "rub", "рубли": "rub"
     }
     currency = aliases.get(currency)
-    if currency not in ("stars", "gram", "rub") or language not in TEXTS:
+    if currency not in ("stars", "gram", "rub") or !re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2})?", language):
         return None
-    if not re.fullmatch(r"[1-9][0-9]{0,7}", amount_text):
+    if not re.fullmatch(r"[1-9][0-9]{0,17}", amount_text):
         return None
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.netloc.lower() not in ("t.me", "www.t.me"):
@@ -309,7 +343,7 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
     chat = message.get("chat", {})
     seller = html.escape(chat.get("first_name") or chat.get("title") or "Продавец")
     safe_gift = html.escape(gift_name)
-    strings = TEXTS[language]
+    strings = get_texts(language)
     offer_id = uuid.uuid4().hex[:12]
     markup = {
         "inline_keyboard": [[
@@ -443,13 +477,13 @@ def handle_business_message(message):
     if draft["stage"] == "language":
         language_input = text.strip().lower()
         language_aliases = {
-            "ru": "ru", "рус": "ru", "русский": "ru", "russian": "ru",
-            "en": "en", "англ": "en", "английский": "en", "english": "en",
-            "zh": "zh", "cn": "zh", "中文": "zh", "китайский": "zh", "chinese": "zh"
+            "рус": "ru", "русский": "ru", "russian": "ru",
+            "англ": "en", "английский": "en", "english": "en",
+            "cn": "zh", "中文": "zh", "китайский": "zh", "chinese": "zh"
         }
-        language = language_aliases.get(language_input)
-        if not language:
-            send_message(chat_id, "Укажи язык: ru / en / zh (можно написать русский / английский / китайский)", connection_id)
+        language = language_aliases.get(language_input, language_input)
+        if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2})?", language):
+            send_message(chat_id, "Отправь ISO-код языка: ru, en, fr, de, es, ar, ja и т. д.", connection_id)
             return
         source_ids = json.loads(draft["source_message_ids"] or "[]")
         source_ids.append(message.get("message_id"))
@@ -758,7 +792,7 @@ def handle_callback(query):
             log.warning("Offer lookup failed: id=%s", offer_id)
             api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Предложение не найдено"})
             return
-        strings = TEXTS[offer["language"]]
+        strings = get_texts(offer["language"])
         status = offer["status"]
         if action in ("accept", "decline") and status != "pending":
             api("answerCallbackQuery", {"callback_query_id": query["id"], "text": strings["expired"], "show_alert": True})
