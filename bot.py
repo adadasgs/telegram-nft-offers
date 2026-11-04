@@ -488,7 +488,7 @@ def handle_malik_callback(query, data, actor_id):
 
     parts = data.split(":")
     screen = "home"
-    body = "⚙️ <b>Malik — панель управления</b>\\nВыберите раздел:"
+    body = "⚙️ <b>Malik — панель управления</b>\nВыберите раздел:"
     keyboard = malik_keyboard()
 
     if data == "malik:users":
@@ -518,13 +518,13 @@ def handle_malik_callback(query, data, actor_id):
                 users[uid] = {"status": "есть офферы", "name": "Пользователь", "offers": int(row["offer_count"])}
             else:
                 users[uid]["offers"] = int(row["offer_count"])
-        body = "👥 <b>Пользователи</b>\\nНажмите на пользователя для управления:"
+        body = "👥 <b>Пользователи</b>\nНажмите на пользователя для управления:"
         buttons = []
         for uid, item in list(users.items())[:30]:
             label = f'{item["name"]} · {uid} · офферов: {item["offers"]}'
             buttons.append([{"text": label[:60], "callback_data": f"malik:u:{uid}"}])
         if not buttons:
-            body += "\\nПока пользователей нет."
+            body += "\nПока пользователей нет."
         buttons.append([{"text": "⬅️ Назад", "callback_data": "malik:home"}])
         keyboard = {"inline_keyboard": buttons}
 
@@ -535,8 +535,8 @@ def handle_malik_callback(query, data, actor_id):
             count = conn.execute("SELECT COUNT(*) AS n FROM offers WHERE chat_id=?", (uid,)).fetchone()["n"]
         label = (access["first_name"] if access else None) or (("@" + access["username"]) if access and access["username"] else "Пользователь")
         status = access["status"] if access else "нет заявки"
-        body = (f"👤 <b>{html.escape(label)}</b>\\nID: <code>{uid}</code>\\n"
-                f"Доступ: {html.escape(status)}\\nОфферов: {count}\\n\\n"
+        body = (f"👤 <b>{html.escape(label)}</b>\nID: <code>{uid}</code>\n"
+                f"Доступ: {html.escape(status)}\nОфферов: {count}\n\n"
                 "Удаление пользователя удалит его заявки на доступ, черновики и офферы из базы бота.")
         keyboard = {"inline_keyboard": [
             [{"text": "🗑 Удалить пользователя и его офферы", "callback_data": f"malik:ud:{uid}"}],
@@ -557,13 +557,13 @@ def handle_malik_callback(query, data, actor_id):
     elif data == "malik:offers":
         with db() as conn:
             rows = conn.execute("SELECT id, chat_id, gift_name, amount, language, status FROM offers ORDER BY created_at DESC LIMIT 20").fetchall()
-        body = "🎁 <b>Последние офферы</b>\\nНажмите на оффер для просмотра:"
+        body = "🎁 <b>Последние офферы</b>\nНажмите на оффер для просмотра:"
         buttons = []
         for row in rows:
             label = f'{row["gift_name"]} · {row["amount"]}⭐ · {row["status"]}'
             buttons.append([{"text": label[:60], "callback_data": f'malik:o:{row["id"]}'}])
         if not buttons:
-            body += "\\nОфферов пока нет."
+            body += "\nОфферов пока нет."
         buttons.append([{"text": "⬅️ Назад", "callback_data": "malik:home"}])
         keyboard = {"inline_keyboard": buttons}
 
@@ -575,11 +575,11 @@ def handle_malik_callback(query, data, actor_id):
             body = "Оффер уже не найден."
             keyboard = {"inline_keyboard": [[{"text": "⬅️ К офферам", "callback_data": "malik:offers"}]]}
         else:
-            body = (f"🎁 <b>{html.escape(offer['gift_name'])}</b>\\n"
-                    f"ID оффера: <code>{offer_id}</code>\\n"
-                    f"Пользователь: <code>{offer['chat_id']}</code>\\n"
-                    f"Сумма: <b>{offer['amount']}⭐</b>\\n"
-                    f"Язык: {offer['language']}\\nСтатус: {html.escape(offer['status'])}\\n"
+            body = (f"🎁 <b>{html.escape(offer['gift_name'])}</b>\n"
+                    f"ID оффера: <code>{offer_id}</code>\n"
+                    f"Пользователь: <code>{offer['chat_id']}</code>\n"
+                    f"Сумма: <b>{offer['amount']}⭐</b>\n"
+                    f"Язык: {offer['language']}\nСтатус: {html.escape(offer['status'])}\n"
                     f'<a href="{html.escape(offer["gift_url"], quote=True)}">Открыть подарок</a>')
             keyboard = {"inline_keyboard": [
                 [{"text": "🗑 Удалить оффер", "callback_data": f"malik:od:{offer_id}"}],
@@ -611,12 +611,13 @@ def handle_private_message(message):
     text = (message.get("text") or "").strip()
     user = message.get("from") or {}
     user_id = user.get("id")
-    if text.split()[0].split("@")[0] == "/malik":
+    command = text.split(maxsplit=1)[0].split("@")[0] if text else ""
+    if command == "/malik":
         if user_id != ADMIN_ID:
             if user_id:
                 send_message(user_id, "⛔ Нет доступа к этой команде.")
             return
-        send_message(user_id, "⚙️ <b>Malik — панель управления</b>\\nВыберите раздел:", reply_markup=malik_keyboard())
+        send_message(user_id, "⚙️ <b>Malik — панель управления</b>\nВыберите раздел:", reply_markup=malik_keyboard())
         return
     if not text.startswith("/start"):
         return
