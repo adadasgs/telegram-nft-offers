@@ -80,7 +80,7 @@ log = logging.getLogger("nft-offers")
 
 TEXTS = {
     "ru": {
-        "offer": "✦ <b>НОВОЕ NFT-ПРЕДЛОЖЕНИЕ</b> ✦\n\n{seller} предлагает сделку с подарком:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Сумма:</b> {amount_display}\n⏳ <b>Оффер действует:</b> {expires_display}\n\n<i>Выберите действие ниже, если условия вам подходят.</i>",
+        "offer": "{seller} предлагает сделку с подарком:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Сумма:</b> {amount_display}\n⏳ <b>Оффер действует:</b> {expires_display}\n\n<i>Выберите действие ниже, если условия вам подходят.</i>",
         "accept": "Принять",
         "decline": "Отклонить",
         "accepted": """✦ <b>СДЕЛКА С NFT</b> ✦
@@ -119,7 +119,7 @@ TEXTS = {
         "help": "Бот работает в подключённых чатах Telegram Business. Отправьте в чате с продавцом одну строку:\n<code>https://t.me/nft/SnoopCigar-84846 2300 ru</code>\n\nСначала подключите бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты и разрешите ему получать и отправлять сообщения."
     },
     "en": {
-        "offer": "✦ <b>NEW NFT OFFER</b> ✦\n\n{seller} proposes a deal for:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Amount:</b> {amount_display}\n⏳ <b>Offer valid for:</b> {expires_display}\n\n<i>Choose an action below if the terms work for you.</i>",
+        "offer": "{seller} proposes a deal for:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Amount:</b> {amount_display}\n⏳ <b>Offer valid for:</b> {expires_display}\n\n<i>Choose an action below if the terms work for you.</i>",
         "accept": "Accept",
         "decline": "Decline",
         "accepted": """<b>NFT deal</b>
@@ -145,7 +145,7 @@ Transfer only after independently verifying payment. The bot cannot hold funds o
         "help": "Use this bot in a connected Telegram Business chat. Send one line in the seller's chat:\n<code>https://t.me/nft/SnoopCigar-84846 2300 en</code>\n\nConnect the bot in Telegram → Settings → Telegram Business → Chatbots and grant permission to receive and send messages."
     },
     "zh": {
-        "offer": "✦ <b>NFT 礼物报价</b> ✦\n\n{seller} 提出交易：\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>报价：</b>{amount_display}\n⏳ <b>有效期：</b>{expires_display}\n\n<i>如接受此条件，请选择下方操作。</i>",
+        "offer": "{seller} 提出交易：\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>报价：</b>{amount_display}\n⏳ <b>有效期：</b>{expires_display}\n\n<i>如接受此条件，请选择下方操作。</i>",
         "accept": "接受",
         "decline": "拒绝",
         "accepted": """<b>NFT 交易</b>
@@ -314,6 +314,19 @@ def send_offer_card(chat_id, caption, connection_id, reply_markup, gift_url):
     # Do not fetch the NFT webpage synchronously: that added up to 4 seconds per offer.
     return send_message(chat_id, caption, connection_id, reply_markup, gift_url)
 
+def pin_business_offer(chat_id, message_id, connection_id):
+    """Pin the sent offer message in the connected Business chat."""
+    try:
+        api("pinChatMessage", {
+            "business_connection_id": connection_id,
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "disable_notification": True
+        })
+        log.info("Pinned offer message %s in chat %s", message_id, chat_id)
+    except Exception:
+        log.exception("Could not pin offer message %s in chat %s", message_id, chat_id)
+
 def delete_source_messages(connection_id, chat_id, message_ids):
     # Business chats must use deleteBusinessMessages, not deleteMessage.
     ids = sorted({int(message_id) for message_id in (message_ids or []) if message_id})
@@ -435,6 +448,7 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
         expires_display="5 ч 59 мин" if language == "ru" else ("5 hr 59 min" if language == "en" else "5小时59分钟")
     )
     sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
+    pin_business_offer(chat["id"], sent["message_id"], connection_id)
     with db() as conn:
         conn.execute(
             """INSERT INTO offers
