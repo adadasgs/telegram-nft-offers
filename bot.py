@@ -27,6 +27,26 @@ API_LOCK = threading.RLock()
 SEEN_UPDATES = set()
 SEEN_UPDATES_LOCK = threading.Lock()
 
+BUSINESS_CACHE = {}
+BUSINESS_CACHE_LOCK = threading.Lock()
+BUSINESS_CACHE_TTL = 60
+
+def get_business_connection_cached(connection_id):
+    now = time.monotonic()
+    with BUSINESS_CACHE_LOCK:
+        cached = BUSINESS_CACHE.get(connection_id)
+        if cached and now - cached[0] < BUSINESS_CACHE_TTL:
+            return cached[1]
+    connection = api("getBusinessConnection", {"business_connection_id": connection_id})
+    with BUSINESS_CACHE_LOCK:
+        BUSINESS_CACHE[connection_id] = (now, connection)
+        if len(BUSINESS_CACHE) > 500:
+            expired = [key for key, value in BUSINESS_CACHE.items()
+                       if now - value[0] >= BUSINESS_CACHE_TTL]
+            for key in expired:
+                BUSINESS_CACHE.pop(key, None)
+    return connection
+
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(message)s"
@@ -136,39 +156,39 @@ def api(method, payload=None):
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is not set")
     body = json.dumps(payload or {}).encode("utf-8")
-    # Serialize Telegram API calls and respect flood-control retry_after values.
+    # Do not serialize all Telegram requests: parallel chats should not wait
+    # behind unrelated sends/edits. Retry only when Telegram explicitly rate-limits.
     for attempt in range(6):
-        with API_LOCK:
-            req = Request(API + method, data=body, headers={"Content-Type": "application/json"})
-            try:
-                with urlopen(req, timeout=40) as response:
-                    data = json.loads(response.read().decode("utf-8"))
-            except HTTPError as exc:
-                detail = exc.read().decode("utf-8", "replace")
-                if exc.code == 429 and attempt < 5:
-                    try:
-                        error_data = json.loads(detail)
-                        wait_seconds = int((error_data.get("parameters") or {}).get("retry_after", 1))
-                    except (ValueError, TypeError):
-                        wait_seconds = 1
-                    wait_seconds = max(1, min(wait_seconds, 300))
-                    log.warning("Telegram rate limit on %s; retrying in %s seconds (attempt %s/6)",
-                                method, wait_seconds + 1, attempt + 1)
-                    time.sleep(wait_seconds + 1)
-                    continue
-                raise RuntimeError(f"Telegram API HTTP {exc.code}: {detail}") from exc
-            except URLError as exc:
-                raise RuntimeError(f"Telegram API connection error: {exc}") from exc
-            if not data.get("ok"):
-                if data.get("error_code") == 429 and attempt < 5:
-                    wait_seconds = int((data.get("parameters") or {}).get("retry_after", 1))
-                    wait_seconds = max(1, min(wait_seconds, 300))
-                    log.warning("Telegram rate limit on %s; retrying in %s seconds (attempt %s/6)",
-                                method, wait_seconds + 1, attempt + 1)
-                    time.sleep(wait_seconds + 1)
-                    continue
-                raise RuntimeError(f"Telegram API error: {data}")
-            return data.get("result")
+        req = Request(API + method, data=body, headers={"Content-Type": "application/json"})
+        try:
+            with urlopen(req, timeout=15) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            if exc.code == 429 and attempt < 5:
+                try:
+                    error_data = json.loads(detail)
+                    wait_seconds = int((error_data.get("parameters") or {}).get("retry_after", 1))
+                except (ValueError, TypeError):
+                    wait_seconds = 1
+                wait_seconds = max(1, min(wait_seconds, 300))
+                log.warning("Telegram rate limit on %s; retrying in %s seconds (attempt %s/6)",
+                            method, wait_seconds, attempt + 1)
+                time.sleep(wait_seconds)
+                continue
+            raise RuntimeError(f"Telegram API HTTP {exc.code}: {detail}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Telegram API connection error: {exc}") from exc
+        if not data.get("ok"):
+            if data.get("error_code") == 429 and attempt < 5:
+                wait_seconds = int((data.get("parameters") or {}).get("retry_after", 1))
+                wait_seconds = max(1, min(wait_seconds, 300))
+                log.warning("Telegram rate limit on %s; retrying in %s seconds (attempt %s/6)",
+                            method, wait_seconds, attempt + 1)
+                time.sleep(wait_seconds)
+                continue
+            raise RuntimeError(f"Telegram API error: {data}")
+        return data.get("result")
     raise RuntimeError(f"Telegram API rate limit persisted for {method} after 6 attempts")
 
 def send_message(chat_id, text, connection_id=None, reply_markup=None, link_preview_url=None):
@@ -339,8 +359,13 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
              gift_url, gift_name, amount, language, int(time.time()), currency)
         )
         conn.commit()
-    # Remove the user's command immediately after the offer has been delivered and stored.
-    delete_source_messages(connection_id, chat["id"], source_message_ids or [message.get("message_id")])
+    # Delete the command immediately in a worker so deletion latency cannot
+    # block the offer pipeline or the next incoming offer.
+    threading.Thread(
+        target=delete_source_messages,
+        args=(connection_id, chat["id"], source_message_ids or [message.get("message_id")]),
+        daemon=True
+    ).start()
     log.info("Offer %s created in chat %s", offer_id, chat["id"])
 
 def handle_business_message(message):
@@ -352,7 +377,7 @@ def handle_business_message(message):
         return
 
     try:
-        connection = api("getBusinessConnection", {"business_connection_id": connection_id})
+        connection = get_business_connection_cached(connection_id)
     except Exception:
         log.exception("Could not verify Business connection")
         return
