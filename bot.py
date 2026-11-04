@@ -59,18 +59,27 @@ TEXTS = {
         "offer": "✦ <b>НОВОЕ NFT-ПРЕДЛОЖЕНИЕ</b> ✦\n\n{seller} предлагает сделку с подарком:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Сумма:</b> {amount_display}\n⏳ <b>Оффер действует:</b> {expires_display}\n\n<i>Выберите действие ниже, если условия вам подходят.</i>",
         "accept": "Принять",
         "decline": "Отклонить",
-        "accepted": """<b>Сделка с NFT</b>
+        "accepted": """✦ <b>СДЕЛКА С NFT</b> ✦
 
-<b>Заказ:</b> #{order_code}
+<code>━━━━━━━━━━━━━━━━━━</code>
+🧾 <b>Заказ:</b> <code>#{order_code}</code>
 
-Покупатель принял предложение на <b>{amount_display}</b> за подарок <a href="{gift_url}">{gift}</a>. Это подтверждает согласие на сделку, но не означает, что средства зарезервированы или удерживаются ботом.
+✅ <b>Предложение принято!</b>
 
-<b>Инструкция для завершения сделки:</b>
-1. Нажмите «Передать подарок» ниже.
-2. Выберите <a href="{gift_url}">{gift}</a>.
-3. После фактической передачи нажмите «Подтвердить передачу» ниже.
+🎁 <b>Подарок:</b> <a href="{gift_url}">{gift}</a>
+💰 <b>Сумма сделки:</b> <b>{amount_display}</b>
 
-Передавайте подарок только после самостоятельной проверки оплаты. Бот не хранит средства и не может автоматически начислить их на баланс.""",
+<code>━━━━━━━━━━━━━━━━━━</code>
+<b>📌 Как завершить сделку</b>
+
+<b>1.</b> Нажмите «Передать подарок».
+<b>2.</b> Выберите указанный NFT-подарок.
+<b>3.</b> После фактической передачи нажмите «Подтвердить передачу».
+
+⚠️ <b>Важно:</b> бот не хранит и не резервирует средства. Передавайте подарок только после самостоятельной проверки оплаты.
+
+<code>━━━━━━━━━━━━━━━━━━</code>
+<i>Статус: предложение принято</i>""",
         "declined": "❌ Продавец отклонил предложение по подарку {gift}.",
         "transfer_link": "Передать подарок",
         "confirm_transfer": "Подтвердить передачу",
@@ -373,9 +382,9 @@ def parse_gift_url(value):
         return None
     return (value.strip(), format_gift_name(match.group(1)))
 
-def create_offer(message, connection_id, gift_url, amount, language, gift_name, source_message_ids=None, currency="stars"):
+def create_offer(message, connection_id, gift_url, amount, language, gift_name, source_message_ids=None, currency="stars", seller_name=None):
     chat = message.get("chat", {})
-    seller = html.escape(chat.get("first_name") or chat.get("title") or "Продавец")
+    seller = html.escape(seller_name or chat.get("first_name") or chat.get("title") or "Продавец")
     safe_gift = html.escape(gift_name)
     strings = TEXTS[language]
     offer_id = uuid.uuid4().hex[:12]
@@ -468,7 +477,7 @@ def handle_business_message(message):
     if parsed:
         gift_url, amount, currency, language, gift_name = parsed
         try:
-            create_offer(message, connection_id, gift_url, amount, language, gift_name, [message.get("message_id")], currency)
+            create_offer(message, connection_id, gift_url, amount, language, gift_name, [message.get("message_id")], currency, (connection.get("user") or {}).get("first_name"))
         except Exception:
             log.exception("One-line offer creation failed: language=%s chat_id=%s", language, chat_id)
             send_message(chat_id, "❌ Не удалось отправить оффер. Ошибка записана в журнал Render. Попробуйте ещё раз.", connection_id)
@@ -529,7 +538,7 @@ def handle_business_message(message):
         source_ids = json.loads(draft["source_message_ids"] or "[]")
         source_ids.append(message.get("message_id"))
         try:
-            create_offer(message, connection_id, draft["gift_url"], int(draft["amount"]), language, draft["gift_name"], source_ids)
+            create_offer(message, connection_id, draft["gift_url"], int(draft["amount"]), language, draft["gift_name"], source_ids, seller_name=(connection.get("user") or {}).get("first_name"))
             with db() as conn:
                 conn.execute("DELETE FROM offer_drafts WHERE draft_key=?", (key,))
                 conn.commit()
