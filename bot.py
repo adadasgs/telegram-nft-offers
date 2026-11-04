@@ -113,17 +113,24 @@ def api(method, payload=None):
         raise RuntimeError(f"Telegram API error: {data}")
     return data.get("result")
 
-def send_message(chat_id, text, connection_id=None, reply_markup=None):
+def send_message(chat_id, text, connection_id=None, reply_markup=None, link_preview_url=None):
     payload = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
+        "parse_mode": "HTML"
     }
     if connection_id:
         payload["business_connection_id"] = connection_id
     if reply_markup:
         payload["reply_markup"] = reply_markup
+    if link_preview_url:
+        payload["link_preview_options"] = {
+            "url": link_preview_url,
+            "prefer_large_media": True,
+            "show_above_text": False
+        }
+    else:
+        payload["link_preview_options"] = {"is_disabled": True}
     return api("sendMessage", payload)
 
 def parse_offer(text):
@@ -144,8 +151,14 @@ def parse_offer(text):
     match = re.fullmatch(r"/nft/([A-Za-z0-9_-]+)", parsed.path)
     if not match:
         return None
-    gift_name = match.group(1).replace("-", " ")
+    gift_name = format_gift_name(match.group(1))
     return url, int(amount_text), language, gift_name
+
+def format_gift_name(slug):
+    value = re.sub(r"([a-z])([A-Z])", r"\1 \2", slug)
+    value = re.sub(r"[-_](\d+)$", r" #\1", value)
+    value = value.replace("-", " ").replace("_", " ")
+    return re.sub(r"\s+", " ", value).strip()
 
 def parse_gift_url(value):
     parsed = urlparse((value or "").strip())
@@ -154,7 +167,7 @@ def parse_gift_url(value):
     match = re.fullmatch(r"/nft/([A-Za-z0-9_-]+)", parsed.path)
     if not match:
         return None
-    return (value.strip(), match.group(1).replace("-", " "))
+    return (value.strip(), format_gift_name(match.group(1)))
 
 def create_offer(message, connection_id, gift_url, amount, language, gift_name):
     chat = message.get("chat", {})
@@ -172,7 +185,7 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name):
         seller=seller, url=html.escape(gift_url, quote=True),
         gift=safe_gift, amount=amount
     )
-    sent = send_message(chat["id"], text_out, connection_id, markup)
+    sent = send_message(chat["id"], text_out, connection_id, markup, gift_url)
     with db() as conn:
         conn.execute(
             """INSERT INTO offers
