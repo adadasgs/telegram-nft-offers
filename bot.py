@@ -849,7 +849,7 @@ def handle_callback(query):
                         return
             body = strings["accepted"].format(order_code=offer_id.upper(), gift=html.escape(offer["gift_name"]), gift_url=html.escape(offer["gift_url"], quote=True), amount_display=html.escape(format_amount(offer["amount"], offer["currency"], offer["gift_name"])))
             keyboard = {"inline_keyboard": [
-                [{"text": strings["transfer_link"], "url": offer["gift_url"]}],
+                [{"text": strings["transfer_link"], "url": TRANSFER_URL}],
                 [{"text": strings["confirm_transfer"], "callback_data": f"transfer:{offer_id}"}]
             ]}
         elif action == "decline":
