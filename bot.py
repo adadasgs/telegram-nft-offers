@@ -356,7 +356,7 @@ def format_amount(amount, currency, gift_name=""):
     gram_marks = ("💎", "🪙", "🔷", "✨")
     gram_mark = gram_marks[int(amount) % len(gram_marks)]
     labels = {"stars": "⭐️ Stars", "gram": f"{gram_mark} GRAM", "rub": "₽ RUB"}
-    return f"{amount} {labels.get(currency, '⭐️ Stars')} {gift_emoji(gift_name)}
+    return f"{amount} {labels.get(currency, '⭐️ Stars')} {gift_emoji(gift_name)}"
 
 def format_gift_name(slug):
     value = re.sub(r"([a-z])([A-Z])", r"\1 \2", slug)
