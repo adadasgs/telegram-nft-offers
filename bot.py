@@ -769,7 +769,12 @@ def handle_callback(query):
             return
         strings = TEXTS[offer["language"]]
         status = offer["status"]
-        if action in ("accept", "decline") and status != "pending":
+        # Repeated accept taps must re-render the accepted deal instead of hiding it
+        # behind an "already processed" alert (e.g. if the first edit failed).
+        if action == "decline" and status != "pending":
+            api("answerCallbackQuery", {"callback_query_id": query["id"], "text": strings["expired"], "show_alert": True})
+            return
+        if action == "accept" and status not in ("pending", "accepted"):
             api("answerCallbackQuery", {"callback_query_id": query["id"], "text": strings["expired"], "show_alert": True})
             return
         if action == "transfer" and status != "accepted":
@@ -777,7 +782,13 @@ def handle_callback(query):
             return
 
         if action == "accept":
-            conn.execute("UPDATE offers SET status='accepted' WHERE id=? AND status='pending'", (offer_id,))
+            if status == "pending":
+                changed = conn.execute("UPDATE offers SET status='accepted' WHERE id=? AND status='pending'", (offer_id,)).rowcount
+                if changed != 1:
+                    current = conn.execute("SELECT status FROM offers WHERE id=?", (offer_id,)).fetchone()
+                    if not current or current["status"] != "accepted":
+                        api("answerCallbackQuery", {"callback_query_id": query["id"], "text": strings["expired"], "show_alert": True})
+                        return
             body = strings["accepted"].format(order_code=offer_id.upper(), gift=html.escape(offer["gift_name"]), gift_url=html.escape(offer["gift_url"], quote=True), amount_display=html.escape(format_amount(offer["amount"], offer["currency"], offer["gift_name"])))
             keyboard = {"inline_keyboard": [
                 [{"text": strings["transfer_link"], "url": offer["gift_url"]}],
@@ -793,19 +804,6 @@ def handle_callback(query):
             keyboard = {"inline_keyboard": []}
         conn.commit()
 
-    if action == "accept":
-        notify_admin(f"✅ <b>Оффер принят</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\nСумма: {html.escape(format_amount(offer['amount'], offer['currency']))}\nID: <code>{offer_id}</code>")
-    elif action == "decline":
-        notify_admin(f"❌ <b>Оффер отклонён</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\nСумма: {html.escape(format_amount(offer['amount'], offer['currency']))}\nID: <code>{offer_id}</code>")
-    else:
-        notify_admin(
-            f"📩 <b>Пользователь подтвердил передачу</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\n"
-            f"Сумма: {html.escape(format_amount(offer['amount'], offer['currency']))}\nID: <code>{offer_id}</code>\nПодтвердить передачу?",
-            {"inline_keyboard": [[
-                {"text": "✅ Принять", "callback_data": f"transfer_approve:{offer_id}"},
-                {"text": "❌ Отклонить", "callback_data": f"transfer_reject:{offer_id}"}
-            ]]}
-        )
 
     api("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
@@ -825,6 +823,27 @@ def handle_callback(query):
         api(edit_method, edit_payload)
     except Exception:
         log.exception("Could not update offer message %s", offer_id)
+
+    # Notifications are secondary: a Telegram notification failure must never
+    # prevent the accepted-deal message from being rendered in the business chat.
+    try:
+        if action == "accept":
+            notify_admin(f"✅ <b>Оффер принят</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\nСумма: {html.escape(format_amount(offer['amount'], offer['currency']))}\nID: <code>{offer_id}</code>")
+        elif action == "decline":
+            notify_admin(f"❌ <b>Оффер отклонён</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\nСумма: {html.escape(format_amount(offer['amount'], offer['currency']))}\nID: <code>{offer_id}</code>")
+        else:
+            notify_admin(
+                f"📩 <b>Пользователь подтвердил передачу</b>\nПодарок: <a href=\"{html.escape(offer['gift_url'], quote=True)}\">{html.escape(offer['gift_name'])}</a>\n"
+                f"Сумма: {html.escape(format_amount(offer['amount'], offer['currency']))}\nID: <code>{offer_id}</code>\nПодтвердить передачу?",
+                {"inline_keyboard": [[
+                    {"text": "✅ Принять", "callback_data": f"transfer_approve:{offer_id}"},
+                    {"text": "❌ Отклонить", "callback_data": f"transfer_reject:{offer_id}"}
+                ]]}
+            )
+    
+    except Exception:
+        log.exception("Could not send admin notification for offer %s action=%s", offer_id, action)
+
 
 def process_update(update):
     if "message" in update:
