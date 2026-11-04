@@ -2,13 +2,14 @@ import asyncio
 import html
 import json
 import logging
+import hashlib
 import os
 import re
 import sqlite3
 import threading
 import time
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -18,6 +19,9 @@ DB_PATH = os.getenv("DB_PATH", "/var/data/offers.sqlite3")
 PORT = int(os.getenv("PORT", "10000"))
 TRANSFER_URL = os.getenv("TRANSFER_URL", "https://t.me/Autooffersgift")
 ADMIN_ID = 9189255415
+PREAPPROVED_OWNER_IDS = {8756303914}
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", hashlib.sha256(BOT_TOKEN.encode("utf-8")).hexdigest()[:40])
+PUBLIC_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 
 logging.basicConfig(
@@ -302,7 +306,7 @@ def handle_business_message(message):
     if not connection.get("is_enabled", False):
         log.warning("Business connection is disabled")
         return
-    if owner_id != ADMIN_ID:
+    if owner_id not in PREAPPROVED_OWNER_IDS and owner_id != ADMIN_ID:
         with db() as conn:
             access = conn.execute("SELECT status FROM access_requests WHERE user_id=?", (owner_id,)).fetchone()
         if not access or access["status"] != "approved":
@@ -586,35 +590,48 @@ def process_update(update):
         item = update["business_connection"]
         log.info("Business connection updated: enabled=%s", item.get("is_enabled"))
 
-def polling_loop():
-    offset = None
+def configure_webhook():
+    if not PUBLIC_URL:
+        raise SystemExit("RENDER_EXTERNAL_URL is missing. Deploy this app as a Render Web Service.")
+    webhook_url = f"{PUBLIC_URL}/telegram/{WEBHOOK_SECRET}"
     allowed = ["message", "business_connection", "business_message", "callback_query"]
-    log.info("Telegram polling started; allowed updates: %s", allowed)
-    while True:
-        try:
-            payload = {"timeout": 30, "allowed_updates": allowed}
-            if offset is not None:
-                payload["offset"] = offset
-            updates = api("getUpdates", payload)
-            if updates:
-                log.info("Telegram delivered %s update(s)", len(updates))
-            for update in updates:
-                offset = update["update_id"] + 1
-                update_type = next((key for key in ("callback_query", "business_message", "message", "business_connection") if key in update), "unknown")
-                if update_type == "callback_query":
-                    callback = update["callback_query"]
-                    log.info("Telegram callback update received: data=%s", callback.get("data"))
-                else:
-                    log.info("Telegram update received: type=%s", update_type)
-                try:
-                    process_update(update)
-                except Exception:
-                    log.exception("Failed to process update %s", update.get("update_id"))
-        except Exception:
-            log.exception("Polling error")
-            time.sleep(4)
+    result = api("setWebhook", {
+        "url": webhook_url,
+        "secret_token": WEBHOOK_SECRET,
+        "allowed_updates": allowed,
+        "drop_pending_updates": False
+    })
+    log.info("Telegram webhook configured: url=%s result=%s", webhook_url, result)
+
 
 class HealthHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        expected_path = f"/telegram/{WEBHOOK_SECRET}"
+        if self.path != expected_path:
+            self.send_response(404)
+            self.end_headers()
+            return
+        supplied_secret = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if supplied_secret != WEBHOOK_SECRET:
+            self.send_response(403)
+            self.end_headers()
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 2_000_000:
+                raise ValueError("Invalid webhook payload size")
+            update = json.loads(self.rfile.read(length).decode("utf-8"))
+            update_type = next((key for key in ("callback_query", "business_message", "message", "business_connection") if key in update), "unknown")
+            log.info("Webhook update received: type=%s update_id=%s", update_type, update.get("update_id"))
+            process_update(update)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        except Exception:
+            log.exception("Webhook update processing failed")
+            self.send_response(500)
+            self.end_headers()
+
     def do_GET(self):
         if self.path not in ("/", "/health"):
             self.send_response(404)
@@ -635,9 +652,9 @@ def main():
         raise SystemExit("Set BOT_TOKEN in Render Environment before starting the service.")
     with db() as conn:
         conn.execute("SELECT 1")
-    threading.Thread(target=polling_loop, daemon=True).start()
-    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    log.info("Health server listening on port %s", PORT)
+    configure_webhook()
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
+    log.info("Webhook and health server listening on port %s", PORT)
     server.serve_forever()
 
 if __name__ == "__main__":
