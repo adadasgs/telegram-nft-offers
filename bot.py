@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DB_PATH = os.getenv("DB_PATH", "/var/data/offers.sqlite3")
+OFFER_TTL_SECONDS = 5 * 60 * 60 + 59 * 60
 PORT = int(os.getenv("PORT", "10000"))
 TRANSFER_URL = os.getenv("TRANSFER_URL", "https://t.me/Autooffersgift")
 ADMIN_ID = 9189255415
@@ -55,7 +56,7 @@ log = logging.getLogger("nft-offers")
 
 TEXTS = {
     "ru": {
-        "offer": "{seller} готов приобрести подарок\n<a href=\"{url}\">{gift}</a>.\n\nПредложенная сумма: <b>{amount_display}</b>\nПодтвердите передачу, если условия вам подходят.",
+        "offer": "✦ <b>НОВОЕ NFT-ПРЕДЛОЖЕНИЕ</b> ✦\n\n{seller} предлагает сделку с подарком:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Сумма:</b> {amount_display}\n⏳ <b>Оффер действует:</b> {expires_display}\n\n<i>Выберите действие ниже, если условия вам подходят.</i>",
         "accept": "Принять",
         "decline": "Отклонить",
         "accepted": """<b>Сделка с NFT</b>
@@ -81,7 +82,7 @@ TEXTS = {
         "help": "Бот работает в подключённых чатах Telegram Business. Отправьте в чате с продавцом одну строку:\n<code>https://t.me/nft/SnoopCigar-84846 2300 ru</code>\n\nСначала подключите бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты и разрешите ему получать и отправлять сообщения."
     },
     "en": {
-        "offer": "{seller} is interested in purchasing this gift\n<a href=\"{url}\">{gift}</a>.\n\nOffer amount: <b>{amount_display}</b>\nAccept the offer if these terms work for you.",
+        "offer": "✦ <b>NEW NFT OFFER</b> ✦\n\n{seller} proposes a deal for:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Amount:</b> {amount_display}\n⏳ <b>Offer valid for:</b> {expires_display}\n\n<i>Choose an action below if the terms work for you.</i>",
         "accept": "Accept",
         "decline": "Decline",
         "accepted": """<b>NFT deal</b>
@@ -107,7 +108,7 @@ Transfer only after independently verifying payment. The bot cannot hold funds o
         "help": "Use this bot in a connected Telegram Business chat. Send one line in the seller's chat:\n<code>https://t.me/nft/SnoopCigar-84846 2300 en</code>\n\nConnect the bot in Telegram → Settings → Telegram Business → Chatbots and grant permission to receive and send messages."
     },
     "zh": {
-        "offer": "{seller} 有意购买这份礼物\n<a href=\"{url}\">{gift}</a>。\n\n报价：<b>{amount_display}</b>\n如果您接受此条件，请确认。",
+        "offer": "✦ <b>NFT 礼物报价</b> ✦\n\n{seller} 提出交易：\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>报价：</b>{amount_display}\n⏳ <b>有效期：</b>{expires_display}\n\n<i>如接受此条件，请选择下方操作。</i>",
         "accept": "接受",
         "decline": "拒绝",
         "accepted": """<b>NFT 交易</b>
@@ -151,12 +152,16 @@ def db():
             amount INTEGER NOT NULL,
             language TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER
         )
     """)
     offer_columns = {row["name"] for row in conn.execute("PRAGMA table_info(offers)")}
     if "currency" not in offer_columns:
         conn.execute("ALTER TABLE offers ADD COLUMN currency TEXT NOT NULL DEFAULT 'stars'")
+    if "expires_at" not in offer_columns:
+        conn.execute("ALTER TABLE offers ADD COLUMN expires_at INTEGER")
+        conn.execute("UPDATE offers SET expires_at = created_at + ? WHERE expires_at IS NULL", (OFFER_TTL_SECONDS,))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS access_requests (
             user_id INTEGER PRIMARY KEY,
@@ -348,8 +353,10 @@ def gift_emoji(gift_name):
 
 
 def format_amount(amount, currency, gift_name=""):
-    labels = {"stars": "⭐️ Stars", "gram": "💎 GRAM", "rub": "₽ RUB"}
-    return f"{amount} {labels.get(currency, '⭐️ Stars')} {gift_emoji(gift_name)}"
+    gram_marks = ("💎", "🪙", "🔷", "✨")
+    gram_mark = gram_marks[int(amount) % len(gram_marks)]
+    labels = {"stars": "⭐️ Stars", "gram": f"{gram_mark} GRAM", "rub": "₽ RUB"}
+    return f"{amount} {labels.get(currency, '⭐️ Stars')} {gift_emoji(gift_name)}
 
 def format_gift_name(slug):
     value = re.sub(r"([a-z])([A-Z])", r"\1 \2", slug)
@@ -380,16 +387,17 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
     }
     text_out = strings["offer"].format(
         seller=seller, url=html.escape(gift_url, quote=True),
-        gift=safe_gift, amount_display=html.escape(format_amount(amount, currency, gift_name))
+        gift=safe_gift, amount_display=html.escape(format_amount(amount, currency, gift_name)),
+        expires_display="5 ч 59 мин" if language == "ru" else ("5 hr 59 min" if language == "en" else "5小时59分钟")
     )
     sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
     with db() as conn:
         conn.execute(
             """INSERT INTO offers
-            (id, connection_id, chat_id, message_id, gift_url, gift_name, amount, language, created_at, currency)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (id, connection_id, chat_id, message_id, gift_url, gift_name, amount, language, created_at, currency, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (offer_id, connection_id, chat["id"], sent["message_id"],
-             gift_url, gift_name, amount, language, int(time.time()), currency)
+             gift_url, gift_name, amount, language, int(time.time()), currency, int(time.time()) + OFFER_TTL_SECONDS)
         )
         conn.commit()
     # Delete the command immediately in a worker so deletion latency cannot
@@ -827,6 +835,12 @@ def handle_callback(query):
             return
         strings = TEXTS[offer["language"]]
         status = offer["status"]
+        expires_at = offer["expires_at"] or (offer["created_at"] + OFFER_TTL_SECONDS)
+        if status == "pending" and int(time.time()) >= int(expires_at):
+            conn.execute("UPDATE offers SET status='expired' WHERE id=? AND status='pending'", (offer_id,))
+            conn.commit()
+            api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "⏳ Срок действия оффера истёк", "show_alert": True})
+            return
         # Repeated accept taps must re-render the accepted deal instead of hiding it
         # behind an "already processed" alert (e.g. if the first edit failed).
         if action == "decline" and status != "pending":
