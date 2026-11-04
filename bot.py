@@ -70,13 +70,14 @@ TEXTS = {
 💰 <b>Сумма сделки:</b> <b>{amount_display}</b>
 
 <code>━━━━━━━━━━━━━━━━━━</code>
-<b>📌 Как завершить сделку</b>
+<b>📌 ИНСТРУКЦИЯ ПО СДЕЛКЕ</b>
 
-<b>1.</b> Нажмите «Передать подарок».
-<b>2.</b> Выберите указанный NFT-подарок.
-<b>3.</b> После фактической передачи нажмите «Подтвердить передачу».
+<blockquote>① Нажмите кнопку <b>«Передать подарок»</b> ниже.
+② Выберите именно тот NFT-подарок, который указан в оффере.
+③ После фактической передачи нажмите <b>«Подтвердить передачу»</b>.</blockquote>
 
-⚠️ <b>Важно:</b> бот не хранит и не резервирует средства. Передавайте подарок только после самостоятельной проверки оплаты.
+<blockquote>⚠️ <b>ВАЖНО</b>
+Бот не хранит и не резервирует средства. Перед передачей NFT самостоятельно убедитесь, что оплата действительно получена.</blockquote>
 
 <code>━━━━━━━━━━━━━━━━━━</code>
 <i>Статус: предложение принято</i>""",
@@ -367,6 +368,13 @@ def format_amount(amount, currency, gift_name=""):
     labels = {"stars": "⭐️ Stars", "gram": f"{gram_mark} GRAM", "rub": "₽ RUB"}
     return f"{amount} {labels.get(currency, '⭐️ Stars')} {gift_emoji(gift_name)}"
 
+
+def format_amount_html(amount, currency, gift_name=""):
+    if currency == "stars":
+        premium_star = '<tg-emoji emoji-id="5848021027782661221">⭐️</tg-emoji>'
+        return f"{amount} {premium_star} <b>Stars</b> {gift_emoji(gift_name)}"
+    return html.escape(format_amount(amount, currency, gift_name))
+
 def format_gift_name(slug):
     value = re.sub(r"([a-z])([A-Z])", r"\1 \2", slug)
     value = re.sub(r"[-_](\d+)$", r" #\1", value)
@@ -396,7 +404,7 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
     }
     text_out = strings["offer"].format(
         seller=seller, url=html.escape(gift_url, quote=True),
-        gift=safe_gift, amount_display=html.escape(format_amount(amount, currency, gift_name)),
+        gift=safe_gift, amount_display=format_amount_html(amount, currency, gift_name),
         expires_display="5 ч 59 мин" if language == "ru" else ("5 hr 59 min" if language == "en" else "5小时59分钟")
     )
     sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
@@ -870,7 +878,7 @@ def handle_callback(query):
                     if not current or current["status"] != "accepted":
                         api("answerCallbackQuery", {"callback_query_id": query["id"], "text": strings["expired"], "show_alert": True})
                         return
-            body = strings["accepted"].format(order_code=offer_id.upper(), gift=html.escape(offer["gift_name"]), gift_url=html.escape(offer["gift_url"], quote=True), amount_display=html.escape(format_amount(offer["amount"], offer["currency"], offer["gift_name"])))
+            body = strings["accepted"].format(order_code=offer_id.upper(), gift=html.escape(offer["gift_name"]), gift_url=html.escape(offer["gift_url"], quote=True), amount_display=format_amount_html(offer["amount"], offer["currency"], offer["gift_name"]))
             keyboard = {"inline_keyboard": [
                 [{"text": strings["transfer_link"], "url": TRANSFER_URL}],
                 [{"text": strings["confirm_transfer"], "callback_data": f"transfer:{offer_id}"}]
