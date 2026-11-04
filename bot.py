@@ -363,10 +363,8 @@ def handle_callback(query):
     chat_id = (msg.get("chat") or {}).get("id")
     with db() as conn:
         offer = conn.execute("SELECT * FROM offers WHERE id=?", (offer_id,)).fetchone()
-        callback_message_id = msg.get("message_id")
-        if (not offer or
-                (callback_message_id is not None and int(callback_message_id) != int(offer["message_id"]))):
-            log.warning("Offer lookup failed: id=%s message_id=%s", offer_id, callback_message_id)
+        if not offer:
+            log.warning("Offer lookup failed: id=%s", offer_id)
             api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Предложение не найдено"})
             return
         strings = TEXTS[offer["language"]]
@@ -401,7 +399,7 @@ def handle_callback(query):
         edit_payload = {
             "business_connection_id": offer["connection_id"],
             "chat_id": offer["chat_id"],
-            "message_id": msg.get("message_id") or offer["message_id"],
+            "message_id": offer["message_id"],
             "parse_mode": "HTML",
             "reply_markup": keyboard
         }
