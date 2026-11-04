@@ -11,7 +11,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse, urlencode
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -46,7 +46,7 @@ TEXTS = {
         "buyer_accept": "Вы приняли предложение. Отправьте подарок покупателю только после проверки условий и получения оплаты самостоятельно. Автоматического удержания или перевода Stars этот бот не выполняет.",
         "buyer_decline": "Вы отклонили предложение.",
         "expired": "Это предложение уже обработано.",
-        "bad": "Формат не распознан.\nОтправьте одной строкой:\nhttps://t.me/nft/НазваниеПодарка-12345 2300 ru\n\nПоследний параметр: ISO-код языка, например ru, en, fr, de, es, ar, ja.",
+        "bad": "Формат не распознан.\nОтправьте одной строкой:\nhttps://t.me/nft/НазваниеПодарка-12345 2300 ru\n\nПоследний параметр: ru, en или zh.",
         "help": "Бот работает в подключённых чатах Telegram Business. Отправьте в чате с продавцом одну строку:\n<code>https://t.me/nft/SnoopCigar-84846 2300 ru</code>\n\nСначала подключите бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты и разрешите ему получать и отправлять сообщения."
     },
     "en": {
@@ -61,7 +61,7 @@ TEXTS = {
         "buyer_accept": "You accepted the offer. Transfer the gift only after independently checking the terms and payment. This bot does not hold or automatically transfer Stars.",
         "buyer_decline": "You declined the offer.",
         "expired": "This offer has already been processed.",
-        "bad": "I couldn't parse that line.\nSend one line in this format:\nhttps://t.me/nft/SnoopCigar-84846 2300 en\n\nUse an ISO language code, e.g. ru, en, fr, de, es, ar, ja.",
+        "bad": "I couldn't parse that line.\nSend one line in this format:\nhttps://t.me/nft/SnoopCigar-84846 2300 en\n\nLanguage: ru, en, or zh.",
         "help": "Use this bot in a connected Telegram Business chat. Send one line in the seller's chat:\n<code>https://t.me/nft/SnoopCigar-84846 2300 en</code>\n\nConnect the bot in Telegram → Settings → Telegram Business → Chatbots and grant permission to receive and send messages."
     },
     "zh": {
@@ -76,49 +76,10 @@ TEXTS = {
         "buyer_accept": "您已接受报价。请先自行核实交易条件和付款，再转移礼物。本机器人不会托管或自动转账 Stars。",
         "buyer_decline": "您已拒绝报价。",
         "expired": "此报价已处理。",
-        "bad": "无法识别格式。\n请发送一行，格式如下：\nhttps://t.me/nft/SnoopCigar-84846 2300 zh\n\n请使用语言代码，例如 ru、en、fr、de、es、ar、ja。",
+        "bad": "无法识别格式。\n请发送一行，格式如下：\nhttps://t.me/nft/SnoopCigar-84846 2300 zh\n\n语言：ru、en 或 zh。",
         "help": "请在已连接的 Telegram Business 聊天中使用。向卖家发送一行：\n<code>https://t.me/nft/SnoopCigar-84846 2300 zh</code>\n\n在 Telegram → 设置 → Telegram Business → 聊天机器人中连接本机器人，并授予接收和发送消息的权限。"
     }
 }
-
-
-_TRANSLATED_TEXTS = {}
-
-def get_texts(language):
-    """Translate offer UI strings to any ISO 639 language code on demand."""
-    language = (language or "ru").lower().replace("_", "-")
-    if language in TEXTS:
-        return TEXTS[language]
-    if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2})?", language):
-        raise ValueError("Invalid ISO language code")
-    if language in _TRANSLATED_TEXTS:
-        return _TRANSLATED_TEXTS[language]
-
-    try:
-        translated = {}
-        token_pattern = re.compile(r"(<[^>]+>|\{[a-z_]+\})")
-        for key, source in TEXTS["ru"].items():
-            tokens = []
-            def protect(match):
-                token = "ZXQKEEP" + str(len(tokens)) + "QXZ"
-                tokens.append((token, match.group(0)))
-                return token
-            protected = token_pattern.sub(protect, source)
-            query = urlencode({"client": "gtx", "sl": "ru", "tl": language.split("-")[0], "dt": "t", "q": protected})
-            request = Request("https://translate.googleapis.com/translate_a/single?" + query,
-                              headers={"User-Agent": "Mozilla/5.0"})
-            with urlopen(request, timeout=12) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            result = "".join(part[0] for part in payload[0] if part and part[0])
-            for token, original in tokens:
-                result = result.replace(token, original)
-            translated[key] = result
-    
-    except Exception:
-        log.exception("Automatic translation failed for language=%s; using English fallback", language)
-        translated = TEXTS["en"]
-    _TRANSLATED_TEXTS[language] = translated
-    return translated
 
 def db():
     folder = os.path.dirname(DB_PATH)
@@ -255,24 +216,7 @@ def fetch_nft_image(gift_url):
     return None
 
 def send_offer_card(chat_id, caption, connection_id, reply_markup, gift_url):
-    image_url = fetch_nft_image(gift_url)
-    if image_url:
-        try:
-            return api("sendPhoto", {
-                "chat_id": chat_id,
-                "photo": image_url,
-                "caption": caption,
-                "parse_mode": "HTML",
-                "business_connection_id": connection_id,
-                "reply_markup": reply_markup
-            })
-        except Exception as exc:
-            # A 429 is a flood-control response, not a broken photo. Do not immediately
-            # issue a second sendMessage request and worsen the same rate limit.
-            if "HTTP 429" in str(exc) or "rate limit persisted" in str(exc).lower():
-                log.error("Telegram rate-limited sendPhoto; not sending a duplicate fallback message: %s", exc)
-                raise
-            log.exception("Could not send NFT photo card; falling back to message")
+    # Do not fetch the NFT webpage synchronously: that added up to 4 seconds per offer.
     return send_message(chat_id, caption, connection_id, reply_markup, gift_url)
 
 def delete_source_messages(connection_id, chat_id, message_ids):
@@ -311,7 +255,7 @@ def parse_offer(text):
         "руб": "rub", "рубли": "rub"
     }
     currency = aliases.get(currency)
-    if currency not in ("stars", "gram", "rub") or not re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2})?", language):
+    if currency not in ("stars", "gram", "rub") or language not in TEXTS:
         return None
     if not re.fullmatch(r"[1-9][0-9]{0,17}", amount_text):
         return None
@@ -325,9 +269,34 @@ def parse_offer(text):
     return url, int(amount_text), currency, language, gift_name
 
 
-def format_amount(amount, currency):
-    labels = {"stars": "⭐️ Stars", "gram": "GRAM", "rub": "₽"}
-    return f"{amount} {labels.get(currency, '⭐️ Stars')}"
+def gift_emoji(gift_name):
+    name = (gift_name or "").lower()
+    rules = [
+        (("cigar", "сигар"), "🚬"),
+        (("dog", "собак", "puppy"), "🐶"),
+        (("cat", "кот", "кошка"), "🐱"),
+        (("frog", "лягуш"), "🐸"),
+        (("pepe",), "🐸"),
+        (("cap", "шап", "hat"), "🧢"),
+        (("rose", "роз"), "🌹"),
+        (("heart", "серд"), "❤️"),
+        (("bear", "медвед"), "🐻"),
+        (("rabbit", "крол"), "🐰"),
+        (("duck", "утк"), "🦆"),
+        (("diamond", "алмаз"), "💎"),
+        (("trophy", "кубок"), "🏆"),
+        (("cake", "торт"), "🎂"),
+        (("star", "звезд"), "⭐️"),
+    ]
+    for words, emoji in rules:
+        if any(word in name for word in words):
+            return emoji
+    return "🎁"
+
+
+def format_amount(amount, currency, gift_name=""):
+    labels = {"stars": "⭐️ Stars", "gram": "💎 GRAM", "rub": "₽ RUB"}
+    return f"{amount} {labels.get(currency, '⭐️ Stars')} {gift_emoji(gift_name)}"
 
 def format_gift_name(slug):
     value = re.sub(r"([a-z])([A-Z])", r"\1 \2", slug)
@@ -348,7 +317,7 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
     chat = message.get("chat", {})
     seller = html.escape(chat.get("first_name") or chat.get("title") or "Продавец")
     safe_gift = html.escape(gift_name)
-    strings = get_texts(language)
+    strings = TEXTS[language]
     offer_id = uuid.uuid4().hex[:12]
     markup = {
         "inline_keyboard": [[
@@ -358,7 +327,7 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
     }
     text_out = strings["offer"].format(
         seller=seller, url=html.escape(gift_url, quote=True),
-        gift=safe_gift, amount_display=html.escape(format_amount(amount, currency))
+        gift=safe_gift, amount_display=html.escape(format_amount(amount, currency, gift_name))
     )
     sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
     with db() as conn:
@@ -370,8 +339,9 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
              gift_url, gift_name, amount, language, int(time.time()), currency)
         )
         conn.commit()
-    log.info("Offer %s created in chat %s", offer_id, chat["id"])
+    # Remove the user's command immediately after the offer has been delivered and stored.
     delete_source_messages(connection_id, chat["id"], source_message_ids or [message.get("message_id")])
+    log.info("Offer %s created in chat %s", offer_id, chat["id"])
 
 def handle_business_message(message):
     # Only the connected account owner may start an offer flow.
@@ -487,8 +457,8 @@ def handle_business_message(message):
             "cn": "zh", "中文": "zh", "китайский": "zh", "chinese": "zh"
         }
         language = language_aliases.get(language_input, language_input)
-        if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2})?", language):
-            send_message(chat_id, "Отправь ISO-код языка: ru, en, fr, de, es, ar, ja и т. д.", connection_id)
+        if language not in TEXTS:
+            send_message(chat_id, "Выбери язык: ru, en или zh.", connection_id)
             return
         source_ids = json.loads(draft["source_message_ids"] or "[]")
         source_ids.append(message.get("message_id"))
@@ -617,7 +587,7 @@ def handle_malik_callback(query, data, actor_id):
         body = "🎁 <b>Последние офферы</b>\nНажмите на оффер для просмотра:"
         buttons = []
         for row in rows:
-            label = f'{row["gift_name"]} · {format_amount(row["amount"], row["currency"])} · {row["status"]}'
+            label = f'{row["gift_name"]} · {format_amount(row["amount"], row["currency"], row["gift_name"])} · {row["status"]}'
             buttons.append([{"text": label[:60], "callback_data": f'malik:o:{row["id"]}'}])
         if not buttons:
             body += "\nОфферов пока нет."
@@ -635,7 +605,7 @@ def handle_malik_callback(query, data, actor_id):
             body = (f"🎁 <b>{html.escape(offer['gift_name'])}</b>\n"
                     f"ID оффера: <code>{offer_id}</code>\n"
                     f"Пользователь: <code>{offer['chat_id']}</code>\n"
-                    f"Сумма: <b>{html.escape(format_amount(offer['amount'], offer['currency']))}</b>\n"
+                    f"Сумма: <b>{html.escape(format_amount(offer['amount'], offer['currency'], offer['gift_name']))}</b>\n"
                     f"Язык: {offer['language']}\nСтатус: {html.escape(offer['status'])}\n"
                     f'<a href="{html.escape(offer["gift_url"], quote=True)}">Открыть подарок</a>')
             keyboard = {"inline_keyboard": [
@@ -797,7 +767,7 @@ def handle_callback(query):
             log.warning("Offer lookup failed: id=%s", offer_id)
             api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Предложение не найдено"})
             return
-        strings = get_texts(offer["language"])
+        strings = TEXTS[offer["language"]]
         status = offer["status"]
         if action in ("accept", "decline") and status != "pending":
             api("answerCallbackQuery", {"callback_query_id": query["id"], "text": strings["expired"], "show_alert": True})
