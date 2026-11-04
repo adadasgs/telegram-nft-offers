@@ -94,24 +94,29 @@ def get_texts(language):
     if language in _TRANSLATED_TEXTS:
         return _TRANSLATED_TEXTS[language]
 
-    translated = {}
-    token_pattern = re.compile(r"(<[^>]+>|\{[a-z_]+\})")
-    for key, source in TEXTS["ru"].items():
-        tokens = []
-        def protect(match):
-            token = "ZXQKEEP" + str(len(tokens)) + "QXZ"
-            tokens.append((token, match.group(0)))
-            return token
-        protected = token_pattern.sub(protect, source)
-        query = urlencode({"client": "gtx", "sl": "ru", "tl": language.split("-")[0], "dt": "t", "q": protected})
-        request = Request("https://translate.googleapis.com/translate_a/single?" + query,
-                          headers={"User-Agent": "Mozilla/5.0"})
-        with urlopen(request, timeout=12) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        result = "".join(part[0] for part in payload[0] if part and part[0])
-        for token, original in tokens:
-            result = result.replace(token, original)
-        translated[key] = result
+    try:
+        translated = {}
+        token_pattern = re.compile(r"(<[^>]+>|\{[a-z_]+\})")
+        for key, source in TEXTS["ru"].items():
+            tokens = []
+            def protect(match):
+                token = "ZXQKEEP" + str(len(tokens)) + "QXZ"
+                tokens.append((token, match.group(0)))
+                return token
+            protected = token_pattern.sub(protect, source)
+            query = urlencode({"client": "gtx", "sl": "ru", "tl": language.split("-")[0], "dt": "t", "q": protected})
+            request = Request("https://translate.googleapis.com/translate_a/single?" + query,
+                              headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen(request, timeout=12) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            result = "".join(part[0] for part in payload[0] if part and part[0])
+            for token, original in tokens:
+                result = result.replace(token, original)
+            translated[key] = result
+    
+    except Exception:
+        log.exception("Automatic translation failed for language=%s; using English fallback", language)
+        translated = TEXTS["en"]
     _TRANSLATED_TEXTS[language] = translated
     return translated
 
