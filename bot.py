@@ -464,13 +464,12 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
         args=(chat["id"], sent["message_id"], connection_id),
         daemon=True
     ).start()
-    # Delete the command immediately in a worker so deletion latency cannot
-    # block the offer pipeline or the next incoming offer.
-    threading.Thread(
-        target=delete_source_messages,
-        args=(connection_id, chat["id"], source_message_ids or [message.get("message_id")]),
-        daemon=True
-    ).start()
+    # Delete the source message immediately after the offer is sent.
+    # The offer is already visible, so deletion cannot delay its delivery.
+    delete_source_messages(
+        connection_id, chat["id"],
+        source_message_ids or [message.get("message_id")]
+    )
     log.info("Offer %s created in chat %s", offer_id, chat["id"])
 
 def handle_business_message(message):
