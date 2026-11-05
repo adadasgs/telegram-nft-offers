@@ -30,7 +30,7 @@ SEEN_UPDATES_LOCK = threading.Lock()
 
 BUSINESS_CACHE = {}
 BUSINESS_CACHE_LOCK = threading.Lock()
-BUSINESS_CACHE_TTL = 60
+BUSINESS_CACHE_TTL = 180
 
 def business_diagnostic(connection_id):
     """Return safe Telegram Business connection metadata; never logs tokens or message text."""
@@ -311,9 +311,8 @@ def fetch_nft_image(gift_url):
     return None
 
 def send_offer_card(chat_id, caption, connection_id, reply_markup, gift_url):
-    # Disable Telegram link previews on the critical send path for faster delivery.
-    # The gift URL remains clickable in the offer text.
-    return send_message(chat_id, caption, connection_id, reply_markup, None)
+    # Keep Telegram's large NFT link preview so the offer includes the gift image.
+    return send_message(chat_id, caption, connection_id, reply_markup, gift_url)
 
 def pin_business_offer(chat_id, message_id, connection_id):
     """Pin the sent offer message in the connected Business chat."""
