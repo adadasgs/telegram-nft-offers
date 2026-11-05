@@ -311,8 +311,9 @@ def fetch_nft_image(gift_url):
     return None
 
 def send_offer_card(chat_id, caption, connection_id, reply_markup, gift_url):
-    # Do not fetch the NFT webpage synchronously: that added up to 4 seconds per offer.
-    return send_message(chat_id, caption, connection_id, reply_markup, gift_url)
+    # Disable Telegram link previews on the critical send path for faster delivery.
+    # The gift URL remains clickable in the offer text.
+    return send_message(chat_id, caption, connection_id, reply_markup, None)
 
 def pin_business_offer(chat_id, message_id, connection_id):
     """Pin the sent offer message in the connected Business chat."""
@@ -447,8 +448,8 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
         gift=safe_gift, amount_display=format_amount_html(amount, currency, gift_name),
         expires_display="5 ч 59 мин" if language == "ru" else ("5 hr 59 min" if language == "en" else "5小时59分钟")
     )
+    # Send the offer first; do not wait for pinning before saving/returning.
     sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
-    pin_business_offer(chat["id"], sent["message_id"], connection_id)
     with db() as conn:
         conn.execute(
             """INSERT INTO offers
@@ -458,6 +459,12 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
              gift_url, gift_name, amount, language, int(time.time()), currency, int(time.time()) + OFFER_TTL_SECONDS)
         )
         conn.commit()
+    # Pin in the background so the offer appears immediately after sendMessage.
+    threading.Thread(
+        target=pin_business_offer,
+        args=(chat["id"], sent["message_id"], connection_id),
+        daemon=True
+    ).start()
     # Delete the command immediately in a worker so deletion latency cannot
     # block the offer pipeline or the next incoming offer.
     threading.Thread(
