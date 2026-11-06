@@ -449,8 +449,19 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
         gift=safe_gift, amount_display=format_amount_html(amount, currency, gift_name),
         expires_display="5 ч 59 мин" if language == "ru" else ("5 hr 59 min" if language == "en" else "5小时59分钟")
     )
-    # Send the offer first; do not wait for pinning before saving/returning.
+    # Deliver the offer first. As soon as Telegram confirms it was sent,
+    # start deleting the command message in parallel with DB persistence/pinning.
     sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
+    source_ids = source_message_ids or [message.get("message_id")]
+    delete_thread = threading.Thread(
+        target=delete_source_messages,
+        args=(connection_id, chat["id"], source_ids),
+        name=f"delete-offer-source-{offer_id}",
+        daemon=True
+    )
+    delete_thread.start()
+
+    # Persist the offer without waiting for message deletion or pinning.
     with db() as conn:
         conn.execute(
             """INSERT INTO offers
@@ -460,19 +471,15 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
              gift_url, gift_name, amount, language, int(time.time()), currency, int(time.time()) + OFFER_TTL_SECONDS)
         )
         conn.commit()
-    # Pin in the background so the offer appears immediately after sendMessage.
+
+    # Pin independently; neither deletion nor pinning blocks offer delivery.
     threading.Thread(
         target=pin_business_offer,
         args=(chat["id"], sent["message_id"], connection_id),
+        name=f"pin-offer-{offer_id}",
         daemon=True
     ).start()
-    # Delete the source message immediately after the offer is sent.
-    # The offer is already visible, so deletion cannot delay its delivery.
-    delete_source_messages(
-        connection_id, chat["id"],
-        source_message_ids or [message.get("message_id")]
-    )
-    log.info("Offer %s created in chat %s", offer_id, chat["id"])
+    log.info("Offer %s created in chat %s; source deletion started", offer_id, chat["id"])
 
 def handle_business_message(message):
     # Only the connected account owner may start an offer flow.
