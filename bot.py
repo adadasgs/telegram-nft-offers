@@ -20,6 +20,7 @@ OFFER_TTL_SECONDS = 5 * 60 * 60 + 59 * 60
 PORT = int(os.getenv("PORT", "10000"))
 TRANSFER_URL = os.getenv("TRANSFER_URL", "https://t.me/Autooffersgift")
 ADMIN_ID = 9189255415
+ADMIN_IDS = {ADMIN_ID, 6199869526}
 PREAPPROVED_OWNER_IDS = {8756303914, 8770529636}
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", hashlib.sha256(BOT_TOKEN.encode("utf-8")).hexdigest()[:40])
 PUBLIC_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
@@ -492,7 +493,7 @@ def handle_business_message(message):
     if not connection.get("is_enabled", False):
         log.warning("Business connection is disabled")
         return
-    if owner_id not in PREAPPROVED_OWNER_IDS and owner_id != ADMIN_ID:
+    if owner_id not in PREAPPROVED_OWNER_IDS and owner_id not in ADMIN_IDS:
         with db() as conn:
             access = conn.execute("SELECT status FROM access_requests WHERE user_id=?", (owner_id,)).fetchone()
             if not access or access["status"] != "approved":
@@ -627,10 +628,11 @@ def handle_business_message(message):
                 log.exception("Could not send offer failure notice to business chat %s", chat_id)
 
 def notify_admin(text, reply_markup=None):
-    try:
-        send_message(ADMIN_ID, text, reply_markup=reply_markup)
-    except Exception:
-        log.exception("Could not notify admin")
+    for admin_id in ADMIN_IDS:
+        try:
+            send_message(admin_id, text, reply_markup=reply_markup)
+        except Exception:
+            log.exception("Could not notify admin %s", admin_id)
 
 def malik_keyboard():
     return {"inline_keyboard": [
@@ -653,7 +655,7 @@ def malik_screen(chat_id, message_id, text, keyboard):
 def handle_malik_callback(query, data, actor_id):
     if not data.startswith("malik:"):
         return False
-    if actor_id != ADMIN_ID:
+    if actor_id not in ADMIN_IDS:
         api("answerCallbackQuery", {
             "callback_query_id": query["id"],
             "text": "Нет доступа",
@@ -795,14 +797,14 @@ def handle_private_message(message):
     user_id = user.get("id")
     command = text.split(maxsplit=1)[0].split("@")[0] if text else ""
     if command == "/malik":
-        if user_id != ADMIN_ID:
+        if user_id not in ADMIN_IDS:
             if user_id:
                 send_message(user_id, "⛔ Нет доступа к этой команде.")
             return
         send_message(user_id, "⚙️ <b>Malik — панель управления</b>\nВыберите раздел:", reply_markup=malik_keyboard())
         return
     if command == "/diag":
-        if user_id != ADMIN_ID:
+        if user_id not in ADMIN_IDS:
             if user_id:
                 send_message(user_id, "⛔ Нет доступа к диагностике.")
             return
@@ -848,7 +850,7 @@ def handle_private_message(message):
     user_id = user.get("id")
     if not user_id:
         return
-    if user_id == ADMIN_ID:
+    if user_id in ADMIN_IDS:
         send_message(user_id, "Панель администратора. Здесь приходят заявки на доступ и подтверждения передачи.")
         return
     with db() as conn:
@@ -904,7 +906,7 @@ def handle_callback(query):
             except Exception:
                 pass
             return
-        if actor_id != ADMIN_ID:
+        if actor_id not in ADMIN_IDS:
             log.warning("Unauthorized access review: actor=%s target=%s", actor_id, target_id)
             api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Только администратор может решать заявки", "show_alert": True})
             return
@@ -925,7 +927,7 @@ def handle_callback(query):
 
     if review_match:
         action, offer_id = review_match.groups()
-        if actor_id != ADMIN_ID:
+        if actor_id not in ADMIN_IDS:
             api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Только администратор может подтвердить передачу", "show_alert": True})
             return
         with db() as conn:
