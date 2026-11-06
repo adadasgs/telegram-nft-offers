@@ -31,7 +31,7 @@ SEEN_UPDATES_LOCK = threading.Lock()
 
 BUSINESS_CACHE = {}
 BUSINESS_CACHE_LOCK = threading.Lock()
-BUSINESS_CACHE_TTL = 180
+BUSINESS_CACHE_TTL = 3600
 
 def business_diagnostic(connection_id):
     """Return safe Telegram Business connection metadata; never logs tokens or message text."""
@@ -55,6 +55,15 @@ def business_diagnostic(connection_id):
         "date": connection.get("date"),
         "rights": {key: rights.get(key) for key in allowed_rights if key in rights}
     }
+
+
+def cache_business_connection(connection):
+    """Warm the Business connection cache from Telegram's own update."""
+    connection_id = (connection or {}).get("id")
+    if not connection_id:
+        return
+    with BUSINESS_CACHE_LOCK:
+        BUSINESS_CACHE[connection_id] = (time.monotonic(), connection)
 
 
 def get_business_connection_cached(connection_id):
@@ -449,9 +458,11 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
         gift=safe_gift, amount_display=format_amount_html(amount, currency, gift_name),
         expires_display="5 ч 59 мин" if language == "ru" else ("5 hr 59 min" if language == "en" else "5小时59分钟")
     )
-    # Deliver the offer first. As soon as Telegram confirms it was sent,
-    # start deleting the command message in parallel with DB persistence/pinning.
+    # Keep the critical path minimal: one Telegram sendMessage call.
+    # Deletion and pinning run separately and never delay delivery.
+    send_started = time.perf_counter()
     sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
+    log.info("Telegram sendMessage for offer %s completed in %.3fs", offer_id, time.perf_counter() - send_started)
     source_ids = source_message_ids or [message.get("message_id")]
     delete_thread = threading.Thread(
         target=delete_source_messages,
@@ -490,11 +501,13 @@ def handle_business_message(message):
     if not connection_id or not text or message.get("sender_business_bot"):
         return
 
+    connection_started = time.perf_counter()
     try:
         connection = get_business_connection_cached(connection_id)
     except Exception:
         log.exception("Could not verify Business connection")
         return
+    log.info("Business connection lookup completed in %.3fs (cache_or_api)", time.perf_counter() - connection_started)
 
     owner_id = (connection.get("user") or {}).get("id")
     if not owner_id or sender.get("id") != owner_id:
@@ -1076,7 +1089,8 @@ def process_update(update):
         handle_callback(update["callback_query"])
     elif "business_connection" in update:
         item = update["business_connection"]
-        log.info("Business connection updated: enabled=%s", item.get("is_enabled"))
+        cache_business_connection(item)
+        log.info("Business connection cache refreshed: enabled=%s", item.get("is_enabled"))
 
 def configure_webhook():
     if not PUBLIC_URL:
