@@ -369,13 +369,14 @@ def parse_offer(text):
     if not re.fullmatch(r"[1-9][0-9]{0,17}", amount_text):
         return None
     parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.netloc.lower() not in ("t.me", "www.t.me"):
+    if parsed.netloc.lower() not in ("t.me", "www.t.me") or parsed.scheme not in ("https", "http"):
         return None
     match = re.fullmatch(r"/nft/([A-Za-z0-9_-]+)", parsed.path)
     if not match:
         return None
+    gift_url = "https://t.me" + parsed.path
     gift_name = format_gift_name(match.group(1))
-    return url, int(amount_text), currency, language, gift_name
+    return gift_url, int(amount_text), currency, language, gift_name
 
 
 def gift_emoji(gift_name):
@@ -476,7 +477,8 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
 def handle_business_message(message):
     # Only the connected account owner may start an offer flow.
     connection_id = message.get("business_connection_id")
-    text = (message.get("text") or "").strip()
+    # Telegram may deliver a Business command as a text message or as a media caption.
+    text = (message.get("text") or message.get("caption") or "").strip()
     sender = message.get("from") or {}
     if not connection_id or not text or message.get("sender_business_bot"):
         return
@@ -489,6 +491,7 @@ def handle_business_message(message):
 
     owner_id = (connection.get("user") or {}).get("id")
     if not owner_id or sender.get("id") != owner_id:
+        log.info("Ignoring Business message from non-owner: sender_id=%s owner_id=%s chat_id=%s", sender.get("id"), owner_id, (message.get("chat") or {}).get("id"))
         return
     if not connection.get("is_enabled", False):
         log.warning("Business connection is disabled")
@@ -519,6 +522,10 @@ def handle_business_message(message):
                         ]]}
                     )
                 log.info("Offer creation blocked for unapproved Business owner %s", owner_id)
+                try:
+                    send_message(message.get("chat", {}).get("id"), "🔒 Доступ к офферам ещё не одобрен. Заявка отправлена администратору.", connection_id)
+                except Exception:
+                    log.exception("Could not notify unapproved Business owner %s", owner_id)
                 return
 
     chat = message.get("chat", {})
