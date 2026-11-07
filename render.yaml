@@ -9,7 +9,7 @@ services:
     envVars:
       - key: BOT_TOKEN
         sync: false
-      - key: DB_PATH
-        value: /tmp/offers.sqlite3
+      - key: DATABASE_URL
+        sync: false
       - key: TRANSFER_URL
         value: https://t.me/Autooffersgift
