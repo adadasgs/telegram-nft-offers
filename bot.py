@@ -922,21 +922,47 @@ def handle_private_message(message):
         send_message(user_id, "Панель управления: /malik")
         return
     if command == "/start":
-        send_message(user_id, "Для продолжения используйте команду /0133")
+        send_message(
+            user_id,
+            "🎮 <b>Добро пожаловать в игру!</b>\n\n"
+            "Рады видеть тебя здесь. Выбери раздел ниже 👇",
+            reply_markup={"inline_keyboard": [
+                [{"text": "🎮 Играть", "callback_data": "game:play"}],
+                [{"text": "ℹ️ О нас", "callback_data": "game:about"}]
+            ]}
+        )
         return
-    send_message(
-        user_id,
-        "Готово.\n\n"
-        "Чтобы создавать предложения, подключите этого бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты.\n"
-        "После подключения отправьте в своём личном Business-чате ссылку на NFT, затем сумму и язык (ru, en или zh).\n"
-        "Можно также отправить одной строкой: ссылка сумма язык."
-    )
+    send_message(user_id, "✅ Офферы работают.")
 
 def handle_callback(query):
     data = query.get("data", "")
     actor_id = (query.get("from") or {}).get("id")
     log.info("Callback received: data=%s actor_id=%s", data, actor_id)
     if handle_malik_callback(query, data, actor_id):
+        return
+    if data in ("game:play", "game:about"):
+        body = ("🎮 <b>Игра готова!</b>\n\nНажми /0133, чтобы проверить доступность системы."
+                if data == "game:play" else
+                "ℹ️ <b>О нас</b>\n\nЭто игровой информационный бот. Добро пожаловать и приятного времени!")
+        api("editMessageText", {
+            "chat_id": query["message"]["chat"]["id"],
+            "message_id": query["message"]["message_id"],
+            "text": body,
+            "reply_markup": {"inline_keyboard": [[{"text": "⬅️ Назад", "callback_data": "game:home"}]]}
+        })
+        api("answerCallbackQuery", {"callback_query_id": query["id"]})
+        return
+    if data == "game:home":
+        api("editMessageText", {
+            "chat_id": query["message"]["chat"]["id"],
+            "message_id": query["message"]["message_id"],
+            "text": "🎮 <b>Добро пожаловать в игру!</b>\n\nРады видеть тебя здесь. Выбери раздел ниже 👇",
+            "reply_markup": {"inline_keyboard": [
+                [{"text": "🎮 Играть", "callback_data": "game:play"}],
+                [{"text": "ℹ️ О нас", "callback_data": "game:about"}]
+            ]}
+        })
+        api("answerCallbackQuery", {"callback_query_id": query["id"]})
         return
     access_match = re.fullmatch(r"(request_access|access_approve|access_decline):([0-9]{1,20})", data)
     review_match = re.fullmatch(r"(transfer_approve|transfer_reject):([a-f0-9]{12})", data)
