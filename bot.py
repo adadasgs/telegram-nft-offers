@@ -96,28 +96,12 @@ TEXTS = {
         "offer": "👤 <b>{buyer_name}</b> предлагает купить ваш NFT-подарок:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Предложение:</b> {amount_display} <b>({usd_display})</b>\n⏳ <b>Оффер действует:</b> {expires_display}\n\n<i>Выберите действие ниже.</i>",
         "accept": "✅ Принять",
         "decline": "❌ Отклонить",
-        "accepted": """<b>🔐 СЛЕДУЙТЕ ИНСТРУКЦИЯМ</b>
-
-<b>Telegram NFT Escrow</b>
+        "accepted": """✅ <b>Предложение принято</b>
+🎁 <b>NFT:</b> <a href="{gift_url}">{gift}</a>
+💰 <b>Сумма:</b> {amount_display} ({usd_display})
 🧾 <b>Заказ:</b> <code>{order_code}</code>
 
-✅ <b>Покупатель принял ваше предложение</b>
-
-🎁 <b>NFT-подарок:</b> <a href="{gift_url}">{gift}</a>
-💰 <b>Сумма:</b> <b>{amount_display}</b>
-💵 <b>Эквивалент:</b> {usd_display}
-
-<blockquote>🛡 <b>Статус оплаты</b>
-Ожидается подтверждение платежа и блокировки средств эскроу-сервисом. Передавайте NFT только после фактического подтверждения блокировки в эскроу.</blockquote>
-
-<b>📌 ИНСТРУКЦИЯ</b>
-① Откройте Telegram-профиль покупателя.
-② Нажмите <b>«Передать подарок»</b> и выберите именно этот NFT.
-③ После фактической передачи нажмите <b>«Подтвердить передачу»</b>.
-
-⏳ <b>Срок оффера:</b> 5 ч 59 мин
-
-<i>Примечание: отметка кнопкой подтверждает действие пользователя, но сама по себе не является проверкой платежа или блокировки средств.</i>""",
+⚠️ <i>Бот не подтверждает оплату. Проверьте её отдельно перед передачей NFT.</i>""",
         "declined": "❌ Продавец отклонил предложение по подарку {gift}.",
         "transfer_link": "🎁 Передать подарок",
         "confirm_transfer": "✅ Подтвердить передачу",
@@ -132,28 +116,12 @@ TEXTS = {
         "offer": "👤 <b>{buyer_name}</b> offers to buy your NFT gift:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Offer:</b> {amount_display} <b>({usd_display})</b>\n⏳ <b>Offer valid for:</b> {expires_display}\n\n<i>Choose an action below.</i>",
         "accept": "✅ Accept",
         "decline": "❌ Decline",
-        "accepted": """<b>🔐 FOLLOW THE INSTRUCTIONS</b>
-
-<b>Telegram NFT Escrow</b>
+        "accepted": """✅ <b>Offer accepted</b>
+🎁 <b>NFT:</b> <a href="{gift_url}">{gift}</a>
+💰 <b>Amount:</b> {amount_display} ({usd_display})
 🧾 <b>Order:</b> <code>{order_code}</code>
 
-✅ <b>The buyer accepted your offer</b>
-
-🎁 <b>NFT gift:</b> <a href="{gift_url}">{gift}</a>
-💰 <b>Amount:</b> <b>{amount_display}</b>
-💵 <b>USD equivalent:</b> {usd_display}
-
-<blockquote>🛡 <b>Payment status</b>
-Awaiting payment and escrow-lock confirmation from the escrow service. Transfer the NFT only after the escrow service actually confirms that the funds are locked.</blockquote>
-
-<b>📌 INSTRUCTIONS</b>
-1. Open the buyer's Telegram profile.
-2. Tap <b>“Transfer the gift”</b> and select this exact NFT.
-3. After the transfer is complete, tap <b>“Confirm transfer”</b>.
-
-⏳ <b>Offer expires in:</b> 5 hr 59 min
-
-<i>Pressing the button records the user's confirmation; it does not independently verify payment or escrow status.</i>""",
+⚠️ <i>This bot does not verify payment. Check it independently before transferring the NFT.</i>""",
         "declined": "❌ The seller declined the offer for {gift}.",
         "transfer_link": "🎁 Transfer the gift",
         "confirm_transfer": "✅ Confirm transfer",
@@ -168,28 +136,12 @@ Awaiting payment and escrow-lock confirmation from the escrow service. Transfer 
         "offer": "👤 <b>{buyer_name}</b> 想购买您的 NFT 礼物：\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>报价：</b>{amount_display} <b>({usd_display})</b>\n⏳ <b>有效期：</b>{expires_display}\n\n<i>请选择下方操作。</i>",
         "accept": "✅ 接受",
         "decline": "❌ 拒绝",
-        "accepted": """<b>🔐 请按照说明操作</b>
-
-<b>Telegram NFT Escrow</b>
+        "accepted": """✅ <b>报价已接受</b>
+🎁 <b>NFT：</b><a href="{gift_url}">{gift}</a>
+💰 <b>金额：</b>{amount_display}（{usd_display}）
 🧾 <b>订单：</b><code>{order_code}</code>
 
-✅ <b>买家已接受您的报价</b>
-
-🎁 <b>NFT 礼物：</b><a href="{gift_url}">{gift}</a>
-💰 <b>金额：</b><b>{amount_display}</b>
-💵 <b>美元参考值：</b>{usd_display}
-
-<blockquote>🛡 <b>付款状态</b>
-正在等待托管服务确认付款及资金锁定。只有托管服务实际确认资金已锁定后，才转移 NFT。</blockquote>
-
-<b>📌 操作步骤</b>
-1. 打开买家的 Telegram 个人资料。
-2. 点击下方“转移礼物”，选择此 NFT。
-3. 转移完成后，点击“确认转移”。
-
-⏳ <b>报价有效期：</b>5小时59分钟
-
-<i>点击按钮仅记录用户确认，不会独立验证付款或托管状态。</i>""",
+⚠️ <i>机器人不会验证付款。转移 NFT 前请自行确认已收到款项。</i>""",
         "declined": "❌ 卖家拒绝了 {gift} 的报价。",
         "transfer_link": "🎁 转移礼物",
         "confirm_transfer": "✅ 确认已转移",
