@@ -929,6 +929,17 @@ def handle_private_message(message):
     user = message.get("from") or {}
     user_id = user.get("id")
     command = text.split(maxsplit=1)[0].split("@")[0] if text else ""
+    if command == "/0133":
+        send_message(
+            user_id,
+            "✅ <b>Доступ к созданию NFT-офферов открыт.</b>\n\n"
+            "Создавать офферы может любой пользователь без одобрения администратора. "
+            "Для отправки офферов подключите этого бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты, "
+            "выдайте разрешения и отправляйте оффер из нужного личного Business-чата.\n\n"
+            "Формат: <code>https://t.me/nft/НазваниеПодарка-12345 2300 ru</code>\n"
+            "Язык в конце: ru, en или zh."
+        )
+        return
     if command == "/malik":
         if user_id not in ADMIN_IDS:
             if user_id:
