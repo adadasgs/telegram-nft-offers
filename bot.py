@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import sqlite3
+from contextlib import AbstractContextManager
 import threading
 import time
 import uuid
@@ -157,7 +158,93 @@ Open the <a href="{transfer_url}"><b>manager's profile</b></a>, tap <b>Transfer 
     }
 }
 
+class PostgresConnection:
+    """Small compatibility wrapper so existing ? placeholders work with psycopg."""
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute(self, query, params=None):
+        query = query.replace("?", "%s")
+        return self.connection.execute(query, params or ())
+
+    def commit(self):
+        self.connection.commit()
+
+    def close(self):
+        self.connection.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is None:
+                self.connection.commit()
+            else:
+                self.connection.rollback()
+        finally:
+            self.connection.close()
+        return False
+
+
 def db():
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if database_url:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise RuntimeError(
+                "DATABASE_URL задан, но psycopg не установлен. Проверьте requirements.txt."
+            ) from exc
+
+        # Render and some providers may supply the legacy postgres:// scheme.
+        if database_url.startswith("postgres://"):
+            database_url = "postgresql://" + database_url[len("postgres://"):]
+        raw = psycopg.connect(database_url, row_factory=dict_row, connect_timeout=15)
+        conn = PostgresConnection(raw)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS offers (
+                id TEXT PRIMARY KEY,
+                connection_id TEXT NOT NULL,
+                chat_id BIGINT NOT NULL,
+                message_id BIGINT,
+                gift_url TEXT NOT NULL,
+                gift_name TEXT NOT NULL,
+                amount BIGINT NOT NULL,
+                language TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at BIGINT NOT NULL,
+                expires_at BIGINT,
+                currency TEXT NOT NULL DEFAULT 'stars'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS access_requests (
+                user_id BIGINT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'pending',
+                username TEXT,
+                first_name TEXT,
+                updated_at BIGINT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS offer_drafts (
+                draft_key TEXT PRIMARY KEY,
+                connection_id TEXT NOT NULL,
+                chat_id BIGINT NOT NULL,
+                gift_url TEXT NOT NULL,
+                gift_name TEXT NOT NULL,
+                amount BIGINT,
+                stage TEXT NOT NULL,
+                updated_at BIGINT NOT NULL,
+                source_message_ids TEXT NOT NULL DEFAULT '[]'
+            )
+        """)
+        conn.commit()
+        return conn
+
+    # Local development fallback. On Render, set DATABASE_URL to use durable PostgreSQL.
     folder = os.path.dirname(DB_PATH)
     if folder:
         os.makedirs(folder, exist_ok=True)
@@ -175,7 +262,8 @@ def db():
             language TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
             created_at INTEGER NOT NULL,
-            expires_at INTEGER
+            expires_at INTEGER,
+            currency TEXT NOT NULL DEFAULT 'stars'
         )
     """)
     offer_columns = {row["name"] for row in conn.execute("PRAGMA table_info(offers)")}
