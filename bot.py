@@ -896,22 +896,35 @@ def handle_callback(query):
                 return
             user = query.get("from") or {}
             with db() as conn:
+                existing = conn.execute(
+                    "SELECT status FROM access_requests WHERE user_id=?", (target_id,)
+                ).fetchone()
+                if existing and existing["status"] == "approved":
+                    api("answerCallbackQuery", {
+                        "callback_query_id": query["id"],
+                        "text": "✅ Доступ уже одобрен — повторная заявка не нужна",
+                        "show_alert": True
+                    })
+                    return
+                already_pending = bool(existing and existing["status"] == "pending")
                 conn.execute("""INSERT INTO access_requests (user_id, status, username, first_name, updated_at)
                     VALUES (?, 'pending', ?, ?, ?)
-                    ON CONFLICT(user_id) DO UPDATE SET status='pending', username=excluded.username,
-                    first_name=excluded.first_name, updated_at=excluded.updated_at""",
+                    ON CONFLICT(user_id) DO UPDATE SET
+                    username=excluded.username, first_name=excluded.first_name,
+                    updated_at=excluded.updated_at""",
                     (target_id, user.get("username"), user.get("first_name"), int(time.time())))
                 conn.commit()
-            notify_admin(
-                "🆕 <b>Новая заявка на доступ к офферам</b>\n"
-                f"Пользователь: {html.escape(user.get('first_name') or 'Без имени')} "
-                f"(@{html.escape(user.get('username') or 'нет username')})\nID: <code>{target_id}</code>",
-                {"inline_keyboard": [[
-                    {"text": "✅ Принять", "callback_data": f"access_approve:{target_id}"},
-                    {"text": "❌ Отклонить", "callback_data": f"access_decline:{target_id}"}
-                ]]}
-            )
-            api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Заявка отправлена"})
+            if not already_pending:
+                notify_admin(
+                    "🆕 <b>Новая заявка на доступ к офферам</b>\n"
+                    f"Пользователь: {html.escape(user.get('first_name') or 'Без имени')} "
+                    f"(@{html.escape(user.get('username') or 'нет username')})\nID: <code>{target_id}</code>",
+                    {"inline_keyboard": [[
+                        {"text": "✅ Принять", "callback_data": f"access_approve:{target_id}"},
+                        {"text": "❌ Отклонить", "callback_data": f"access_decline:{target_id}"}
+                    ]]}
+                )
+            api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Заявка уже отправлена" if already_pending else "Заявка отправлена"})
             try:
                 api("editMessageText", {"chat_id": target_id, "message_id": query["message"]["message_id"],
                     "text": "⏳ Заявка отправлена администратору. Ожидайте решения."})
