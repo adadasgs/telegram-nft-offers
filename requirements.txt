@@ -1,1 +1,2 @@
-# This bot uses only Python standard-library modules.
+# PostgreSQL driver for persistent Render database storage.
+psycopg[binary]==3.2.9
