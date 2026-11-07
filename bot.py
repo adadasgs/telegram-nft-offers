@@ -434,6 +434,21 @@ def delete_source_messages(connection_id, chat_id, message_ids):
             chat_id
         )
 
+def normalize_nft_url(value):
+    value = (value or "").strip()
+    if value.startswith("t.me/") or value.startswith("www.t.me/"):
+        value = "https://" + value
+    parsed = urlparse(value)
+    if parsed.scheme not in ("https", "http") or parsed.netloc.lower() not in ("t.me", "www.t.me"):
+        return None
+    if parsed.query or parsed.fragment:
+        # Telegram NFT links do not need query strings or fragments.
+        return None
+    if not re.fullmatch(r"/nft/[A-Za-z0-9_-]+", parsed.path):
+        return None
+    return "https://t.me" + parsed.path
+
+
 def parse_offer(text):
     parts = (text or "").strip().split()
     if len(parts) == 3:
@@ -456,14 +471,11 @@ def parse_offer(text):
         return None
     if not re.fullmatch(r"[1-9][0-9]{0,17}", amount_text):
         return None
-    parsed = urlparse(url)
-    if parsed.netloc.lower() not in ("t.me", "www.t.me") or parsed.scheme not in ("https", "http"):
+    gift_url = normalize_nft_url(url)
+    if not gift_url:
         return None
-    match = re.fullmatch(r"/nft/([A-Za-z0-9_-]+)", parsed.path)
-    if not match:
-        return None
-    gift_url = "https://t.me" + parsed.path
-    gift_name = format_gift_name(match.group(1))
+    slug = urlparse(gift_url).path.rsplit("/", 1)[-1]
+    gift_name = format_gift_name(slug)
     return gift_url, int(amount_text), currency, language, gift_name
 
 
@@ -518,13 +530,11 @@ def format_gift_name(slug):
     return re.sub(r"\s+", " ", value).strip()
 
 def parse_gift_url(value):
-    parsed = urlparse((value or "").strip())
-    if parsed.scheme != "https" or parsed.netloc.lower() not in ("t.me", "www.t.me"):
+    normalized = normalize_nft_url(value)
+    if not normalized:
         return None
-    match = re.fullmatch(r"/nft/([A-Za-z0-9_-]+)", parsed.path)
-    if not match:
-        return None
-    return (value.strip(), format_gift_name(match.group(1)))
+    slug = urlparse(normalized).path.rsplit("/", 1)[-1]
+    return (normalized, format_gift_name(slug))
 
 def create_offer(message, connection_id, gift_url, amount, language, gift_name, source_message_ids=None, currency="stars", seller_name=None):
     chat = message.get("chat", {})
