@@ -18,6 +18,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DB_PATH = os.getenv("DB_PATH", "/var/data/offers.sqlite3")
 OFFER_TTL_SECONDS = 5 * 60 * 60 + 59 * 60
 PORT = int(os.getenv("PORT", "10000"))
+# Telegram's published creator reward estimate: about $0.013 per Star.
+# This is an indicative USD value, not the buyer's local purchase price.
+STAR_USD_RATE = float(os.getenv("STAR_USD_RATE", "0.013"))
 TRANSFER_URL = os.getenv("TRANSFER_URL", "https://t.me/Autooffersgift")
 ADMIN_ID = 9189255415
 ADMIN_IDS = {ADMIN_ID, 6199869526}
@@ -90,37 +93,34 @@ log = logging.getLogger("nft-offers")
 
 TEXTS = {
     "ru": {
-        "offer": "{seller} предлагает сделку с подарком:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Сумма:</b> {amount_display}\n⏳ <b>Оффер действует:</b> {expires_display}\n\n<i>Выберите действие ниже, если условия вам подходят.</i>",
-        "accept": "Принять",
-        "decline": "Отклонить",
-        "accepted": """✦ <b>СДЕЛКА С NFT</b> ✦
+        "offer": "👤 <b>{buyer_name}</b> предлагает купить ваш NFT-подарок:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Предложение:</b> {amount_display} <b>({usd_display})</b>\n⏳ <b>Оффер действует:</b> {expires_display}\n\n<i>Выберите действие ниже.</i>",
+        "accept": "✅ Принять",
+        "decline": "❌ Отклонить",
+        "accepted": """<b>🔐 СЛЕДУЙТЕ ИНСТРУКЦИЯМ</b>
 
-<code>━━━━━━━━━━━━━━━━━━</code>
-🧾 <b>Заказ:</b> <code>#{order_code}</code>
+<b>Telegram NFT Escrow</b>
+🧾 <b>Заказ:</b> <code>{order_code}</code>
 
-✅ <b>Предложение принято!</b>
+✅ <b>Покупатель принял ваше предложение</b>
 
-🎁 <b>Подарок:</b> <a href="{gift_url}">{gift}</a>
-💰 <b>Сумма сделки:</b> <b>{amount_display}</b>
+🎁 <b>NFT-подарок:</b> <a href="{gift_url}">{gift}</a>
+💰 <b>Сумма:</b> <b>{amount_display}</b>
+💵 <b>Эквивалент:</b> {usd_display}
 
-<code>━━━━━━━━━━━━━━━━━━</code>
-<b>📌 ИНСТРУКЦИЯ ПО СДЕЛКЕ</b>
+<blockquote>🛡 <b>Статус оплаты</b>
+Ожидается подтверждение платежа и блокировки средств эскроу-сервисом. Передавайте NFT только после фактического подтверждения блокировки в эскроу.</blockquote>
 
-<blockquote>① Нажмите кнопку <b>«Передать подарок»</b> ниже.
-② Выберите именно тот NFT-подарок, который указан в оффере.
-③ После фактической передачи нажмите <b>«Подтвердить передачу»</b>.</blockquote>
+<b>📌 ИНСТРУКЦИЯ</b>
+① Откройте Telegram-профиль покупателя.
+② Нажмите <b>«Передать подарок»</b> и выберите именно этот NFT.
+③ После фактической передачи нажмите <b>«Подтвердить передачу»</b>.
 
-<blockquote>✨ <b>ОПЛАТА ПО СДЕЛКЕ</b>
+⏳ <b>Срок оффера:</b> 5 ч 59 мин
 
-💰 <b>Сумма по договорённости:</b> {amount_display}
-
-После подтверждения передачи ожидайте оплату от покупателя. Проверьте фактическое поступление Stars самостоятельно — бот не отправляет и не резервирует средства автоматически.</blockquote>
-
-<code>━━━━━━━━━━━━━━━━━━</code>
-<i>Статус: предложение принято</i>""",
+<i>Примечание: отметка кнопкой подтверждает действие пользователя, но сама по себе не является проверкой платежа или блокировки средств.</i>""",
         "declined": "❌ Продавец отклонил предложение по подарку {gift}.",
-        "transfer_link": "Передать подарок",
-        "confirm_transfer": "Подтвердить передачу",
+        "transfer_link": "🎁 Передать подарок",
+        "confirm_transfer": "✅ Подтвердить передачу",
         "transfer_marked": "Отметка о передаче получена. Бот не проверяет фактическую передачу NFT или оплату. Проверьте их самостоятельно.",
         "buyer_accept": "Вы приняли предложение. Отправьте подарок покупателю только после проверки условий и получения оплаты самостоятельно. Автоматического удержания или перевода Stars этот бот не выполняет.",
         "buyer_decline": "Вы отклонили предложение.",
@@ -129,24 +129,34 @@ TEXTS = {
         "help": "Бот работает в подключённых чатах Telegram Business. Отправьте в чате с продавцом одну строку:\n<code>https://t.me/nft/SnoopCigar-84846 2300 ru</code>\n\nСначала подключите бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты и разрешите ему получать и отправлять сообщения."
     },
     "en": {
-        "offer": "{seller} proposes a deal for:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Amount:</b> {amount_display}\n⏳ <b>Offer valid for:</b> {expires_display}\n\n<i>Choose an action below if the terms work for you.</i>",
-        "accept": "Accept",
-        "decline": "Decline",
-        "accepted": """<b>NFT deal</b>
+        "offer": "👤 <b>{buyer_name}</b> offers to buy your NFT gift:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Offer:</b> {amount_display} <b>({usd_display})</b>\n⏳ <b>Offer valid for:</b> {expires_display}\n\n<i>Choose an action below.</i>",
+        "accept": "✅ Accept",
+        "decline": "❌ Decline",
+        "accepted": """<b>🔐 FOLLOW THE INSTRUCTIONS</b>
 
-<b>Order:</b> #{order_code}
+<b>Telegram NFT Escrow</b>
+🧾 <b>Order:</b> <code>{order_code}</code>
 
-The buyer accepted the offer of <b>{amount_display}</b> for <a href="{gift_url}">{gift}</a>. This confirms agreement only; the bot does not reserve or hold funds.
+✅ <b>The buyer accepted your offer</b>
 
-<b>How to complete the deal:</b>
-1. Tap “Transfer the gift” below.
-2. Select <a href="{gift_url}">{gift}</a>.
-3. After the gift is actually transferred, tap “Confirm transfer” below.
+🎁 <b>NFT gift:</b> <a href="{gift_url}">{gift}</a>
+💰 <b>Amount:</b> <b>{amount_display}</b>
+💵 <b>USD equivalent:</b> {usd_display}
 
-Transfer only after independently verifying payment. The bot cannot hold funds or automatically credit a balance.""",
+<blockquote>🛡 <b>Payment status</b>
+Awaiting payment and escrow-lock confirmation from the escrow service. Transfer the NFT only after the escrow service actually confirms that the funds are locked.</blockquote>
+
+<b>📌 INSTRUCTIONS</b>
+1. Open the buyer's Telegram profile.
+2. Tap <b>“Transfer the gift”</b> and select this exact NFT.
+3. After the transfer is complete, tap <b>“Confirm transfer”</b>.
+
+⏳ <b>Offer expires in:</b> 5 hr 59 min
+
+<i>Pressing the button records the user's confirmation; it does not independently verify payment or escrow status.</i>""",
         "declined": "❌ The seller declined the offer for {gift}.",
-        "transfer_link": "Transfer the gift",
-        "confirm_transfer": "Confirm transfer",
+        "transfer_link": "🎁 Transfer the gift",
+        "confirm_transfer": "✅ Confirm transfer",
         "transfer_marked": "A participant marked the gift as transferred. The bot does not verify NFT ownership or payment; verify both independently.",
         "buyer_accept": "You accepted the offer. Transfer the gift only after independently checking the terms and payment. This bot does not hold or automatically transfer Stars.",
         "buyer_decline": "You declined the offer.",
@@ -155,24 +165,34 @@ Transfer only after independently verifying payment. The bot cannot hold funds o
         "help": "Use this bot in a connected Telegram Business chat. Send one line in the seller's chat:\n<code>https://t.me/nft/SnoopCigar-84846 2300 en</code>\n\nConnect the bot in Telegram → Settings → Telegram Business → Chatbots and grant permission to receive and send messages."
     },
     "zh": {
-        "offer": "{seller} 提出交易：\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>报价：</b>{amount_display}\n⏳ <b>有效期：</b>{expires_display}\n\n<i>如接受此条件，请选择下方操作。</i>",
-        "accept": "接受",
-        "decline": "拒绝",
-        "accepted": """<b>NFT 交易</b>
+        "offer": "👤 <b>{buyer_name}</b> 想购买您的 NFT 礼物：\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>报价：</b>{amount_display} <b>({usd_display})</b>\n⏳ <b>有效期：</b>{expires_display}\n\n<i>请选择下方操作。</i>",
+        "accept": "✅ 接受",
+        "decline": "❌ 拒绝",
+        "accepted": """<b>🔐 请按照说明操作</b>
 
-<b>订单：</b>#{order_code}
+<b>Telegram NFT Escrow</b>
+🧾 <b>订单：</b><code>{order_code}</code>
 
-买家已接受以 <b>{amount_display}</b> 购买礼物 <a href="{gift_url}">{gift}</a>。这仅表示双方同意交易，机器人不会预留或托管资金。
+✅ <b>买家已接受您的报价</b>
 
-<b>完成交易的步骤：</b>
-1. 点击下方“转移礼物”。
-2. 选择 <a href="{gift_url}">{gift}</a>。
-3. 实际转移礼物后，点击下方“确认转移”。
+🎁 <b>NFT 礼物：</b><a href="{gift_url}">{gift}</a>
+💰 <b>金额：</b><b>{amount_display}</b>
+💵 <b>美元参考值：</b>{usd_display}
 
-请先自行核实付款再转移礼物。机器人无法托管资金或自动入账。""",
+<blockquote>🛡 <b>付款状态</b>
+正在等待托管服务确认付款及资金锁定。只有托管服务实际确认资金已锁定后，才转移 NFT。</blockquote>
+
+<b>📌 操作步骤</b>
+1. 打开买家的 Telegram 个人资料。
+2. 点击下方“转移礼物”，选择此 NFT。
+3. 转移完成后，点击“确认转移”。
+
+⏳ <b>报价有效期：</b>5小时59分钟
+
+<i>点击按钮仅记录用户确认，不会独立验证付款或托管状态。</i>""",
         "declined": "❌ 卖家拒绝了 {gift} 的报价。",
-        "transfer_link": "转移礼物",
-        "confirm_transfer": "确认已转移",
+        "transfer_link": "🎁 转移礼物",
+        "confirm_transfer": "✅ 确认已转移",
         "transfer_marked": "参与者已标记礼物转移。机器人无法验证 NFT 所有权或付款，请自行核实。",
         "buyer_accept": "您已接受报价。请先自行核实交易条件和付款，再转移礼物。本机器人不会托管或自动转账 Stars。",
         "buyer_decline": "您已拒绝报价。",
@@ -426,6 +446,12 @@ def format_amount_html(amount, currency, gift_name=""):
         return f"{amount} {premium_star} <b>Stars</b> {gift_emoji(gift_name)}"
     return html.escape(format_amount(amount, currency, gift_name))
 
+
+def format_usd_equivalent(amount, currency):
+    if currency != "stars":
+        return "—"
+    return f"≈ ${amount * STAR_USD_RATE:,.2f} USD"
+
 def format_gift_name(slug):
     value = re.sub(r"([a-z])([A-Z])", r"\1 \2", slug)
     value = re.sub(r"[-_](\d+)$", r" #\1", value)
@@ -444,6 +470,8 @@ def parse_gift_url(value):
 def create_offer(message, connection_id, gift_url, amount, language, gift_name, source_message_ids=None, currency="stars", seller_name=None):
     chat = message.get("chat", {})
     seller = html.escape(seller_name or chat.get("first_name") or chat.get("title") or "Продавец")
+    buyer_label = ("@" + chat.get("username")) if chat.get("username") else (chat.get("first_name") or "Покупатель")
+    buyer_label = html.escape(str(buyer_label))
     safe_gift = html.escape(gift_name)
     strings = TEXTS[language]
     offer_id = uuid.uuid4().hex[:12]
@@ -454,8 +482,10 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
         ]]
     }
     text_out = strings["offer"].format(
-        seller=seller, url=html.escape(gift_url, quote=True),
+        seller=seller, buyer_name=buyer_label,
+        url=html.escape(gift_url, quote=True),
         gift=safe_gift, amount_display=format_amount_html(amount, currency, gift_name),
+        usd_display=format_usd_equivalent(amount, currency),
         expires_display="5 ч 59 мин" if language == "ru" else ("5 hr 59 min" if language == "en" else "5小时59分钟")
     )
     # Keep the critical path minimal: one Telegram sendMessage call.
@@ -1020,7 +1050,14 @@ def handle_callback(query):
                     if not current or current["status"] != "accepted":
                         api("answerCallbackQuery", {"callback_query_id": query["id"], "text": strings["expired"], "show_alert": True})
                         return
-            body = strings["accepted"].format(order_code=offer_id.upper(), gift=html.escape(offer["gift_name"]), gift_url=html.escape(offer["gift_url"], quote=True), amount_display=format_amount_html(offer["amount"], offer["currency"], offer["gift_name"]))
+            order_code = f"TG-{offer_id[:7].upper()}"
+            body = strings["accepted"].format(
+                order_code=order_code,
+                gift=html.escape(offer["gift_name"]),
+                gift_url=html.escape(offer["gift_url"], quote=True),
+                amount_display=format_amount_html(offer["amount"], offer["currency"], offer["gift_name"]),
+                usd_display=format_usd_equivalent(offer["amount"], offer["currency"])
+            )
             keyboard = {"inline_keyboard": [
                 [{"text": strings["transfer_link"], "url": TRANSFER_URL}],
                 [{"text": strings["confirm_transfer"], "callback_data": f"transfer:{offer_id}"}]
