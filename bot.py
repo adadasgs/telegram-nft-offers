@@ -310,7 +310,7 @@ def send_message(chat_id, text, connection_id=None, reply_markup=None, link_prev
         payload["link_preview_options"] = {
             "url": link_preview_url,
             "prefer_large_media": True,
-            "show_above_text": False
+            "show_above_text": True
         }
     else:
         payload["link_preview_options"] = {"is_disabled": True}
@@ -1087,7 +1087,7 @@ def handle_callback(query):
             edit_payload["caption"] = body
         else:
             edit_payload["text"] = body
-            edit_payload["link_preview_options"] = {"url": offer["gift_url"], "prefer_large_media": True, "show_above_text": False}
+            edit_payload["link_preview_options"] = {"url": offer["gift_url"], "prefer_large_media": True, "show_above_text": True}
         api(edit_method, edit_payload)
     except Exception:
         log.exception("Could not edit original offer message %s; sending fallback message", offer_id)
