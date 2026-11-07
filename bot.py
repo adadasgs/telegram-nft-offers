@@ -589,37 +589,7 @@ def handle_business_message(message):
     if not connection.get("is_enabled", False):
         log.warning("Business connection is disabled")
         return
-    if owner_id not in PREAPPROVED_OWNER_IDS and owner_id not in ADMIN_IDS:
-        with db() as conn:
-            access = conn.execute("SELECT status FROM access_requests WHERE user_id=?", (owner_id,)).fetchone()
-            if not access or access["status"] != "approved":
-                if not access or access["status"] != "pending":
-                    owner = connection.get("user") or {}
-                    conn.execute("""INSERT INTO access_requests
-                        (user_id, status, username, first_name, updated_at)
-                        VALUES (?, 'pending', ?, ?, ?)
-                        ON CONFLICT(user_id) DO UPDATE SET status='pending',
-                        username=excluded.username, first_name=excluded.first_name,
-                        updated_at=excluded.updated_at""",
-                        (owner_id, owner.get("username"), owner.get("first_name"), int(time.time())))
-                    conn.commit()
-                    notify_admin(
-                        "🆕 <b>Новая заявка на доступ к офферам</b>\n"
-                        "Бизнес-аккаунт попытался создать оффер.\n"
-                        f"Пользователь: {html.escape(owner.get('first_name') or 'Без имени')} "
-                        f"(@{html.escape(owner.get('username') or 'нет username')})\n"
-                        f"ID: <code>{owner_id}</code>",
-                        {"inline_keyboard": [[
-                            {"text": "✅ Принять", "callback_data": f"access_approve:{owner_id}"},
-                            {"text": "❌ Отклонить", "callback_data": f"access_decline:{owner_id}"}
-                        ]]}
-                    )
-                log.info("Offer creation blocked for unapproved Business owner %s", owner_id)
-                try:
-                    send_message(message.get("chat", {}).get("id"), "🔒 Доступ к офферам ещё не одобрен. Заявка отправлена администратору.", connection_id)
-                except Exception:
-                    log.exception("Could not notify unapproved Business owner %s", owner_id)
-                return
+    # Access applications disabled: all valid connected Business owners may create offers.
 
     chat = message.get("chat", {})
     if chat.get("type") != "private":
@@ -944,26 +914,23 @@ def handle_private_message(message):
             log.exception("Admin business diagnostic command failed")
             send_message(user_id, "❌ Не удалось выполнить диагностику. Подробности — в журнале Render.")
         return
-    if not text.startswith("/start"):
+    if command not in ("/0133", "/start"):
         return
-    user = message.get("from") or {}
-    user_id = user.get("id")
     if not user_id:
         return
     if user_id in ADMIN_IDS:
-        send_message(user_id, "Панель администратора. Здесь приходят заявки на доступ и подтверждения передачи.")
+        send_message(user_id, "Панель управления: /malik")
         return
-    with db() as conn:
-        row = conn.execute("SELECT status FROM access_requests WHERE user_id=?", (user_id,)).fetchone()
-    status = row["status"] if row else None
-    if status == "approved":
-        send_message(user_id, "✅ Доступ открыт. Теперь можно пользоваться офферами.")
-    elif status == "pending":
-        send_message(user_id, "⏳ Ваша заявка уже отправлена. Ожидайте решения администратора.")
-    else:
-        send_message(user_id, "🔒 <b>Доступ заблокирован</b>\nЧтобы пользоваться офферами, отправьте заявку на проверку.", reply_markup={
-            "inline_keyboard": [[{"text": "Отправить на проверку", "callback_data": f"request_access:{user_id}"}]]
-        })
+    if command == "/start":
+        send_message(user_id, "Для продолжения используйте команду /0133")
+        return
+    send_message(
+        user_id,
+        "Готово.\n\n"
+        "Чтобы создавать предложения, подключите этого бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты.\n"
+        "После подключения отправьте в своём личном Business-чате ссылку на NFT, затем сумму и язык (ru, en или zh).\n"
+        "Можно также отправить одной строкой: ссылка сумма язык."
+    )
 
 def handle_callback(query):
     data = query.get("data", "")
@@ -1268,6 +1235,7 @@ def main():
         raise SystemExit("Set BOT_TOKEN in Render Environment before starting the service.")
     with db() as conn:
         conn.execute("SELECT 1")
+    api("setMyCommands", {"commands": [{"command": "0133", "description": "Открыть"}]})
     configure_webhook()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
     log.info("Webhook and health server listening on port %s", PORT)
