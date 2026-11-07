@@ -229,6 +229,14 @@ def db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_notifications (
+                id TEXT PRIMARY KEY,
+                text TEXT NOT NULL,
+                created_at BIGINT NOT NULL,
+                is_read INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS offer_drafts (
                 draft_key TEXT PRIMARY KEY,
                 connection_id TEXT NOT NULL,
@@ -279,6 +287,14 @@ def db():
             username TEXT,
             first_name TEXT,
             updated_at INTEGER NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS admin_notifications (
+            id TEXT PRIMARY KEY,
+            text TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            is_read INTEGER NOT NULL DEFAULT 0
         )
     """)
     conn.execute("""
@@ -698,6 +714,15 @@ def handle_business_message(message):
                 log.exception("Could not send offer failure notice to business chat %s", chat_id)
 
 def notify_admin(text, reply_markup=None):
+    try:
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO admin_notifications (id, text, created_at, is_read) VALUES (?, ?, ?, 0)",
+                (uuid.uuid4().hex, str(text), int(time.time()))
+            )
+            conn.commit()
+    except Exception:
+        log.exception("Could not store admin notification")
     for admin_id in ADMIN_IDS:
         try:
             send_message(admin_id, text, reply_markup=reply_markup)
@@ -705,9 +730,16 @@ def notify_admin(text, reply_markup=None):
             log.exception("Could not notify admin %s", admin_id)
 
 def malik_keyboard():
+    try:
+        with db() as conn:
+            unread = conn.execute("SELECT COUNT(*) AS n FROM admin_notifications WHERE is_read=0").fetchone()["n"]
+    except Exception:
+        unread = 0
+    label = f"🔔 Уведомления ({unread})" if unread else "🔔 Уведомления"
     return {"inline_keyboard": [
         [{"text": "👥 Пользователи", "callback_data": "malik:users"}],
-        [{"text": "🎁 Офферы", "callback_data": "malik:offers"}]
+        [{"text": "🎁 Офферы", "callback_data": "malik:offers"}],
+        [{"text": label, "callback_data": "malik:notifications"}]
     ]}
 
 
@@ -745,7 +777,38 @@ def handle_malik_callback(query, data, actor_id):
     body = "⚙️ <b>Malik — панель управления</b>\nВыберите раздел:"
     keyboard = malik_keyboard()
 
-    if data == "malik:users":
+    if data == "malik:notifications":
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT text, created_at FROM admin_notifications ORDER BY created_at DESC LIMIT 15"
+            ).fetchall()
+            conn.execute("UPDATE admin_notifications SET is_read=1 WHERE is_read=0")
+            conn.commit()
+        if rows:
+            lines = ["🔔 <b>Последние уведомления</b>"]
+            for row in rows:
+                stamp = time.strftime("%d.%m %H:%M", time.localtime(int(row["created_at"])))
+                plain = html.unescape(re.sub(r"<[^>]*>", "", str(row["text"])))
+                lines.append(f"\n🕒 <b>{stamp}</b>\n{html.escape(plain)[:700]}")
+            body = "\n".join(lines)
+        else:
+            body = "🔔 <b>Уведомления</b>\nПока уведомлений нет."
+        keyboard = {"inline_keyboard": [
+            [{"text": "🧹 Очистить историю", "callback_data": "malik:notifications_clear"}],
+            [{"text": "⬅️ Назад", "callback_data": "malik:home"}]
+        ]}
+
+    elif data == "malik:notifications_clear":
+        with db() as conn:
+            conn.execute("DELETE FROM admin_notifications")
+            conn.commit()
+        body = "✅ История уведомлений очищена."
+        keyboard = {"inline_keyboard": [
+            [{"text": "🔔 Уведомления", "callback_data": "malik:notifications"}],
+            [{"text": "⬅️ В меню", "callback_data": "malik:home"}]
+        ]}
+
+    elif data == "malik:users":
         screen = "users"
         with db() as conn:
             rows = conn.execute("""
@@ -914,7 +977,7 @@ def handle_private_message(message):
             log.exception("Admin business diagnostic command failed")
             send_message(user_id, "❌ Не удалось выполнить диагностику. Подробности — в журнале Render.")
         return
-    if command not in ("/0133", "/start"):
+    if command != "/start":
         return
     if not user_id:
         return
@@ -932,8 +995,7 @@ def handle_private_message(message):
             ]}
         )
         return
-    send_message(user_id, "✅ Офферы работают.")
-
+    
 def handle_callback(query):
     data = query.get("data", "")
     actor_id = (query.get("from") or {}).get("id")
@@ -941,7 +1003,7 @@ def handle_callback(query):
     if handle_malik_callback(query, data, actor_id):
         return
     if data in ("game:play", "game:about"):
-        body = ("🎮 <b>Игра готова!</b>\n\nНажми /0133, чтобы проверить доступность системы."
+        body = ("🎮 <b>Игровой раздел</b>\n\nЭтот раздел скоро будет доступен."
                 if data == "game:play" else
                 "ℹ️ <b>О нас</b>\n\nЭто игровой информационный бот. Добро пожаловать и приятного времени!")
         api("editMessageText", {
@@ -1261,7 +1323,7 @@ def main():
         raise SystemExit("Set BOT_TOKEN in Render Environment before starting the service.")
     with db() as conn:
         conn.execute("SELECT 1")
-    api("setMyCommands", {"commands": [{"command": "0133", "description": "Открыть"}]})
+    api("setMyCommands", {"commands": []})
     configure_webhook()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
     log.info("Webhook and health server listening on port %s", PORT)
