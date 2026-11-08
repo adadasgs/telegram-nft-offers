@@ -6,7 +6,7 @@ import hashlib
 import os
 import re
 import sqlite3
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 import threading
 import time
 import uuid
@@ -30,6 +30,11 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", hashlib.sha256(BOT_TOKEN.encode("ut
 PUBLIC_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 API_LOCK = threading.RLock()
+# Serialize outbound messages and keep a conservative global pace.
+SEND_MESSAGE_LOCK = threading.Lock()
+SEND_PAUSED = threading.Event()
+SEND_MIN_INTERVAL = max(1.0, float(os.getenv("SEND_MIN_INTERVAL", "1.25")))
+LAST_SEND_AT = 0.0
 SEEN_UPDATES = set()
 SEEN_UPDATES_LOCK = threading.Lock()
 
@@ -317,43 +322,86 @@ def db():
     return conn
 
 def api(method, payload=None):
+    global LAST_SEND_AT
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is not set")
-    body = json.dumps(payload or {}).encode("utf-8")
-    # Do not serialize all Telegram requests: parallel chats should not wait
-    # behind unrelated sends/edits. Retry only when Telegram explicitly rate-limits.
-    for attempt in range(6):
-        req = Request(API + method, data=body, headers={"Content-Type": "application/json"})
+
+    # Outbound messages are serialized and paced across all webhook worker threads.
+    # Telegram's PEER_FLOOD is an account-level restriction, not a transient
+    # per-request error: stop sending instead of hammering the account.
+    send_guard = SEND_MESSAGE_LOCK if method == "sendMessage" else nullcontext()
+    with send_guard:
+        if method == "sendMessage":
+            if SEND_PAUSED.is_set():
+                raise RuntimeError(
+                    "Outbound sends paused after Telegram PEER_FLOOD. "
+                    "Wait until Telegram restrictions are lifted before resuming."
+                )
+            delay = SEND_MIN_INTERVAL - (time.monotonic() - LAST_SEND_AT)
+            if delay > 0:
+                time.sleep(delay)
+
         try:
-            with urlopen(req, timeout=15) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            if exc.code == 429 and attempt < 5:
+            body = json.dumps(payload or {}).encode("utf-8")
+            for attempt in range(6):
+                req = Request(API + method, data=body, headers={"Content-Type": "application/json"})
                 try:
-                    error_data = json.loads(detail)
-                    wait_seconds = int((error_data.get("parameters") or {}).get("retry_after", 1))
-                except (ValueError, TypeError):
-                    wait_seconds = 1
-                wait_seconds = max(1, min(wait_seconds, 300))
-                log.warning("Telegram rate limit on %s; retrying in %s seconds (attempt %s/6)",
-                            method, wait_seconds, attempt + 1)
-                time.sleep(wait_seconds)
-                continue
-            raise RuntimeError(f"Telegram API HTTP {exc.code}: {detail}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"Telegram API connection error: {exc}") from exc
-        if not data.get("ok"):
-            if data.get("error_code") == 429 and attempt < 5:
-                wait_seconds = int((data.get("parameters") or {}).get("retry_after", 1))
-                wait_seconds = max(1, min(wait_seconds, 300))
-                log.warning("Telegram rate limit on %s; retrying in %s seconds (attempt %s/6)",
-                            method, wait_seconds, attempt + 1)
-                time.sleep(wait_seconds)
-                continue
-            raise RuntimeError(f"Telegram API error: {data}")
-        return data.get("result")
-    raise RuntimeError(f"Telegram API rate limit persisted for {method} after 6 attempts")
+                    with urlopen(req, timeout=15) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+                except HTTPError as exc:
+                    detail = exc.read().decode("utf-8", "replace")
+                    if method == "sendMessage" and "PEER_FLOOD" in detail.upper():
+                        SEND_PAUSED.set()
+                        log.critical(
+                            "OUTBOUND_PAUSED: Telegram returned PEER_FLOOD; "
+                            "all further sendMessage calls are suspended for this process."
+                        )
+                        raise RuntimeError(
+                            "Telegram PEER_FLOOD: outbound messages paused; no automatic retry."
+                        ) from exc
+                    if exc.code == 429 and attempt < 5:
+                        try:
+                            error_data = json.loads(detail)
+                            wait_seconds = int((error_data.get("parameters") or {}).get("retry_after", 1))
+                        except (ValueError, TypeError):
+                            wait_seconds = 1
+                        wait_seconds = max(1, wait_seconds)
+                        log.warning(
+                            "Telegram rate limit on %s; respecting retry_after=%s seconds (attempt %s/6)",
+                            method, wait_seconds, attempt + 1
+                        )
+                        time.sleep(wait_seconds)
+                        continue
+                    raise RuntimeError(f"Telegram API HTTP {exc.code}: {detail}") from exc
+                except URLError as exc:
+                    raise RuntimeError(f"Telegram API connection error: {exc}") from exc
+
+                if not data.get("ok"):
+                    detail = json.dumps(data, ensure_ascii=False)
+                    if method == "sendMessage" and "PEER_FLOOD" in detail.upper():
+                        SEND_PAUSED.set()
+                        log.critical(
+                            "OUTBOUND_PAUSED: Telegram returned PEER_FLOOD; "
+                            "all further sendMessage calls are suspended for this process."
+                        )
+                        raise RuntimeError(
+                            "Telegram PEER_FLOOD: outbound messages paused; no automatic retry."
+                        )
+                    if data.get("error_code") == 429 and attempt < 5:
+                        wait_seconds = int((data.get("parameters") or {}).get("retry_after", 1))
+                        wait_seconds = max(1, wait_seconds)
+                        log.warning(
+                            "Telegram rate limit on %s; respecting retry_after=%s seconds (attempt %s/6)",
+                            method, wait_seconds, attempt + 1
+                        )
+                        time.sleep(wait_seconds)
+                        continue
+                    raise RuntimeError(f"Telegram API error: {data}")
+                return data.get("result")
+            raise RuntimeError(f"Telegram API rate limit persisted for {method} after 6 attempts")
+        finally:
+            if method == "sendMessage":
+                LAST_SEND_AT = time.monotonic()
 
 def send_message(chat_id, text, connection_id=None, reply_markup=None, link_preview_url=None):
     payload = {
@@ -668,10 +716,11 @@ def handle_business_message(message):
                     log.error("PEER_FLOOD_CONTEXT %s", json.dumps(info, ensure_ascii=False, sort_keys=True))
                 except Exception:
                     log.exception("Could not collect Business connection context after PEER_FLOOD")
-            try:
-                send_message(chat_id, "❌ Telegram отклонил отправку оффера (PEER_FLOOD или другая ошибка). Проверьте журнал Render; повторные попытки подряд не делайте.", connection_id)
-            except Exception:
-                log.exception("Could not send offer failure notice to business chat %s", chat_id)
+            if "PEER_FLOOD" not in str(exc).upper():
+                try:
+                    send_message(chat_id, "❌ Telegram отклонил отправку оффера. Проверьте журнал Render; повторные попытки подряд не делайте.", connection_id)
+                except Exception:
+                    log.exception("Could not send offer failure notice to business chat %s", chat_id)
         return
 
     # New step-by-step syntax: URL -> amount -> language.
@@ -745,10 +794,11 @@ def handle_business_message(message):
                     log.error("PEER_FLOOD_CONTEXT %s", json.dumps(info, ensure_ascii=False, sort_keys=True))
                 except Exception:
                     log.exception("Could not collect Business connection context after PEER_FLOOD")
-            try:
-                send_message(chat_id, "❌ Telegram отклонил отправку оффера (PEER_FLOOD или другая ошибка). Проверьте журнал Render; повторные попытки подряд не делайте.", connection_id)
-            except Exception:
-                log.exception("Could not send offer failure notice to business chat %s", chat_id)
+            if "PEER_FLOOD" not in str(exc).upper():
+                try:
+                    send_message(chat_id, "❌ Telegram отклонил отправку оффера. Проверьте журнал Render; повторные попытки подряд не делайте.", connection_id)
+                except Exception:
+                    log.exception("Could not send offer failure notice to business chat %s", chat_id)
 
 def notify_admin(text, reply_markup=None):
     try:
