@@ -32,7 +32,10 @@ API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 API_LOCK = threading.RLock()
 # Serialize outbound messages and keep a conservative global pace.
 SEND_MESSAGE_LOCK = threading.Lock()
-SEND_PAUSED = threading.Event()
+# Pause only the Business chat that received PEER_FLOOD; bot commands like /start
+# and admin controls use ordinary bot chats and must remain responsive.
+PAUSED_BUSINESS_CHATS = set()
+PAUSED_BUSINESS_CHATS_LOCK = threading.Lock()
 SEND_MIN_INTERVAL = max(1.0, float(os.getenv("SEND_MIN_INTERVAL", "1.25")))
 LAST_SEND_AT = 0.0
 SEEN_UPDATES = set()
@@ -326,23 +329,28 @@ def api(method, payload=None):
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is not set")
 
-    # Outbound messages are serialized and paced across all webhook worker threads.
-    # Telegram's PEER_FLOOD is an account-level restriction, not a transient
-    # per-request error: stop sending instead of hammering the account.
+    payload = payload or {}
+    business_connection_id = payload.get("business_connection_id")
+    business_chat_id = payload.get("chat_id")
+    business_key = (str(business_connection_id), int(business_chat_id)) if business_connection_id and business_chat_id is not None else None
+
+    # Only Business sends are paused for a chat after PEER_FLOOD. Normal bot
+    # commands and private bot chats (/start, admin panel) remain available.
     send_guard = SEND_MESSAGE_LOCK if method == "sendMessage" else nullcontext()
     with send_guard:
         if method == "sendMessage":
-            if SEND_PAUSED.is_set():
-                raise RuntimeError(
-                    "Outbound sends paused after Telegram PEER_FLOOD. "
-                    "Wait until Telegram restrictions are lifted before resuming."
-                )
+            if business_key:
+                with PAUSED_BUSINESS_CHATS_LOCK:
+                    if business_key in PAUSED_BUSINESS_CHATS:
+                        raise RuntimeError(
+                            "Business chat sends paused after Telegram PEER_FLOOD for this chat."
+                        )
             delay = SEND_MIN_INTERVAL - (time.monotonic() - LAST_SEND_AT)
             if delay > 0:
                 time.sleep(delay)
 
         try:
-            body = json.dumps(payload or {}).encode("utf-8")
+            body = json.dumps(payload).encode("utf-8")
             for attempt in range(6):
                 req = Request(API + method, data=body, headers={"Content-Type": "application/json"})
                 try:
@@ -350,14 +358,16 @@ def api(method, payload=None):
                         data = json.loads(response.read().decode("utf-8"))
                 except HTTPError as exc:
                     detail = exc.read().decode("utf-8", "replace")
-                    if method == "sendMessage" and "PEER_FLOOD" in detail.upper():
-                        SEND_PAUSED.set()
+                    if method == "sendMessage" and business_key and "PEER_FLOOD" in detail.upper():
+                        with PAUSED_BUSINESS_CHATS_LOCK:
+                            PAUSED_BUSINESS_CHATS.add(business_key)
                         log.critical(
-                            "OUTBOUND_PAUSED: Telegram returned PEER_FLOOD; "
-                            "all further sendMessage calls are suspended for this process."
+                            "BUSINESS_CHAT_PAUSED: Telegram returned PEER_FLOOD; "
+                            "only this Business chat is suspended (connection_id=%s chat_id=%s).",
+                            business_connection_id, business_chat_id
                         )
                         raise RuntimeError(
-                            "Telegram PEER_FLOOD: outbound messages paused; no automatic retry."
+                            "Telegram PEER_FLOOD: this Business chat is paused; no automatic retry."
                         ) from exc
                     if exc.code == 429 and attempt < 5:
                         try:
@@ -378,14 +388,16 @@ def api(method, payload=None):
 
                 if not data.get("ok"):
                     detail = json.dumps(data, ensure_ascii=False)
-                    if method == "sendMessage" and "PEER_FLOOD" in detail.upper():
-                        SEND_PAUSED.set()
+                    if method == "sendMessage" and business_key and "PEER_FLOOD" in detail.upper():
+                        with PAUSED_BUSINESS_CHATS_LOCK:
+                            PAUSED_BUSINESS_CHATS.add(business_key)
                         log.critical(
-                            "OUTBOUND_PAUSED: Telegram returned PEER_FLOOD; "
-                            "all further sendMessage calls are suspended for this process."
+                            "BUSINESS_CHAT_PAUSED: Telegram returned PEER_FLOOD; "
+                            "only this Business chat is suspended (connection_id=%s chat_id=%s).",
+                            business_connection_id, business_chat_id
                         )
                         raise RuntimeError(
-                            "Telegram PEER_FLOOD: outbound messages paused; no automatic retry."
+                            "Telegram PEER_FLOOD: this Business chat is paused; no automatic retry."
                         )
                     if data.get("error_code") == 429 and attempt < 5:
                         wait_seconds = int((data.get("parameters") or {}).get("retry_after", 1))
