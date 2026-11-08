@@ -597,9 +597,25 @@ def handle_business_message(message):
     # Telegram may deliver a Business command as a text message or as a media caption.
     text = (message.get("text") or message.get("caption") or "").strip()
     sender = message.get("from") or {}
-    if not connection_id or not text or message.get("sender_business_bot"):
+    if not connection_id:
+        log.warning("BUSINESS_DIAG rejected: missing business_connection_id; update has no usable Business context")
+        return
+    if not text:
+        log.info("BUSINESS_DIAG ignored: empty text/caption; chat_id=%s message_id=%s",
+                 (message.get("chat") or {}).get("id"), message.get("message_id"))
+        return
+    if message.get("sender_business_bot"):
+        log.info("BUSINESS_DIAG ignored: message was sent by a business bot; chat_id=%s",
+                 (message.get("chat") or {}).get("id"))
         return
 
+    chat = message.get("chat") or {}
+    log.info(
+        "BUSINESS_DIAG received: connection_id=%s chat_id=%s chat_type=%s sender_id=%s "
+        "message_id=%s text_present=%s",
+        connection_id, chat.get("id"), chat.get("type"), sender.get("id"),
+        message.get("message_id"), bool(text)
+    )
     connection_started = time.perf_counter()
     try:
         connection = get_business_connection_cached(connection_id)
@@ -608,17 +624,28 @@ def handle_business_message(message):
         return
     log.info("Business connection lookup completed in %.3fs (cache_or_api)", time.perf_counter() - connection_started)
 
-    owner_id = (connection.get("user") or {}).get("id")
+    owner = connection.get("user") or {}
+    owner_id = owner.get("id")
+    rights = connection.get("rights") or {}
+    log.info(
+        "BUSINESS_DIAG connection: enabled=%s owner_id=%s sender_matches_owner=%s "
+        "can_reply=%s can_read_messages=%s can_view_gifts_and_stars=%s",
+        connection.get("is_enabled"), owner_id, bool(owner_id and sender.get("id") == owner_id),
+        rights.get("can_reply"), rights.get("can_read_messages"),
+        rights.get("can_view_gifts_and_stars")
+    )
     if not owner_id or sender.get("id") != owner_id:
-        log.info("Ignoring Business message from non-owner: sender_id=%s owner_id=%s chat_id=%s", sender.get("id"), owner_id, (message.get("chat") or {}).get("id"))
+        log.warning("BUSINESS_DIAG rejected: sender is not the connected account owner; sender_id=%s owner_id=%s chat_id=%s",
+                    sender.get("id"), owner_id, chat.get("id"))
         return
     if not connection.get("is_enabled", False):
-        log.warning("Business connection is disabled")
+        log.warning("BUSINESS_DIAG rejected: Business connection is disabled; connection_id=%s", connection_id)
         return
-    # Access applications disabled: all valid connected Business owners may create offers.
+    # Telegram only delivers Business updates allowed by the account's Business settings.
 
-    chat = message.get("chat", {})
     if chat.get("type") != "private":
+        log.warning("BUSINESS_DIAG rejected: unsupported chat type=%s chat_id=%s",
+                    chat.get("type"), chat.get("id"))
         return
     chat_id = chat.get("id")
     key = f"{connection_id}:{chat_id}"
