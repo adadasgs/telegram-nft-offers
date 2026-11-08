@@ -617,11 +617,31 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
         usd_display=format_usd_equivalent(amount, currency),
         expires_display="5 ч 59 мин" if language == "ru" else ("5 hr 59 min" if language == "en" else "5小时59分钟")
     )
-    # Keep the critical path minimal: one Telegram sendMessage call.
-    # Deletion and pinning run separately and never delay delivery.
+    # Persist first: if Telegram refuses delivery (for example PEER_FLOOD),
+    # the offer remains recorded as queued instead of disappearing.
+    created_at = int(time.time())
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO offers
+            (id, connection_id, chat_id, message_id, gift_url, gift_name, amount, language, status, created_at, currency, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)""",
+            (offer_id, connection_id, chat["id"], None, gift_url, gift_name,
+             amount, language, created_at, currency, created_at + OFFER_TTL_SECONDS)
+        )
+        conn.commit()
+
+    # Telegram is still authoritative: queued records are not force-sent or
+    # retried after PEER_FLOOD. They remain available for safe manual handling.
     send_started = time.perf_counter()
     sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
     log.info("Telegram sendMessage for offer %s completed in %.3fs", offer_id, time.perf_counter() - send_started)
+    with db() as conn:
+        conn.execute(
+            "UPDATE offers SET message_id=?, status='pending' WHERE id=? AND status='queued'",
+            (sent["message_id"], offer_id)
+        )
+        conn.commit()
+
     source_ids = source_message_ids or [message.get("message_id")]
     delete_thread = threading.Thread(
         target=delete_source_messages,
@@ -630,17 +650,6 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
         daemon=True
     )
     delete_thread.start()
-
-    # Persist the offer without waiting for message deletion or pinning.
-    with db() as conn:
-        conn.execute(
-            """INSERT INTO offers
-            (id, connection_id, chat_id, message_id, gift_url, gift_name, amount, language, created_at, currency, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (offer_id, connection_id, chat["id"], sent["message_id"],
-             gift_url, gift_name, amount, language, int(time.time()), currency, int(time.time()) + OFFER_TTL_SECONDS)
-        )
-        conn.commit()
 
     # Pin independently; neither deletion nor pinning blocks offer delivery.
     threading.Thread(
