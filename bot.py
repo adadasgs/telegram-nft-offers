@@ -742,14 +742,22 @@ def handle_business_message(message):
         rights.get("can_reply"), rights.get("can_read_messages"),
         rights.get("can_view_gifts_and_stars")
     )
-    if not owner_id or sender.get("id") != owner_id:
-        log.warning("BUSINESS_DIAG rejected: sender is not the connected account owner; sender_id=%s owner_id=%s chat_id=%s",
-                    sender.get("id"), owner_id, chat.get("id"))
+    # In a Business chat, sender_id is normally the customer, while owner_id
+    # is the connected business account. They are expected to be different.
+    # Validate the connection and its reply permission, not the customer's ID.
+    if not owner_id:
+        log.warning("BUSINESS_DIAG rejected: connection has no owner; connection_id=%s", connection_id)
         return
     if not connection.get("is_enabled", False):
         log.warning("BUSINESS_DIAG rejected: Business connection is disabled; connection_id=%s", connection_id)
         return
-    # Telegram only delivers Business updates allowed by the account's Business settings.
+    if rights.get("can_reply") is not True:
+        log.warning("BUSINESS_DIAG rejected: Business connection cannot reply; connection_id=%s owner_id=%s",
+                    connection_id, owner_id)
+        return
+    if not sender.get("id"):
+        log.warning("BUSINESS_DIAG rejected: message has no sender ID; chat_id=%s", chat.get("id"))
+        return
 
     if chat.get("type") != "private":
         log.warning("BUSINESS_DIAG rejected: unsupported chat type=%s chat_id=%s",
