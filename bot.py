@@ -121,7 +121,7 @@ TEXTS = {
         "declined": "❌ Продавец отклонил предложение по подарку {gift}.",
         "transfer_link": "🎁 Передать подарок",
         "confirm_transfer": "✅ Подтвердить передачу",
-        "transfer_marked": "⏳ Сейчас проверим поступление подарка менеджеру. Ожидаемое время обработки — до 30 минут.\\n💰 <b>Сумма оффера:</b> {amount_display} ({usd_display})",
+        "transfer_marked": "⏳ Сейчас проверим поступление подарка менеджеру. Ожидаемое время обработки — до 30 минут.\n💰 <b>Сумма оффера:</b> {amount_display} ({usd_display})",
         "buyer_accept": "Вы приняли предложение. Отправьте подарок покупателю только после проверки условий и получения оплаты самостоятельно. Автоматического удержания или перевода Stars этот бот не выполняет.",
         "buyer_decline": "Вы отклонили предложение.",
         "expired": "Это предложение уже обработано.",
@@ -142,7 +142,7 @@ Open the <a href="{transfer_url}"><b>manager's profile</b></a>, tap <b>Transfer 
         "declined": "❌ The seller declined the offer for {gift}.",
         "transfer_link": "🎁 Transfer the gift",
         "confirm_transfer": "✅ Confirm transfer",
-        "transfer_marked": "⏳ We will now check that the gift reached the manager. Processing may take up to 30 minutes.\\n💰 <b>Offer amount:</b> {amount_display} ({usd_display})",
+        "transfer_marked": "⏳ We will now check that the gift reached the manager. Processing may take up to 30 minutes.\n💰 <b>Offer amount:</b> {amount_display} ({usd_display})",
         "buyer_accept": "You accepted the offer. Transfer the gift only after independently checking the terms and payment. This bot does not hold or automatically transfer Stars.",
         "buyer_decline": "You declined the offer.",
         "expired": "This offer has already been processed.",
@@ -163,7 +163,7 @@ Open the <a href="{transfer_url}"><b>manager's profile</b></a>, tap <b>Transfer 
         "declined": "❌ 卖家拒绝了 {gift} 的报价。",
         "transfer_link": "🎁 转移礼物",
         "confirm_transfer": "✅ 确认已转移",
-        "transfer_marked": "⏳ 我们现在检查礼物是否已到达经理账户。处理时间最长约 30 分钟。\\n💰 <b>报价金额：</b>{amount_display}（{usd_display}）",
+        "transfer_marked": "⏳ 我们现在检查礼物是否已到达经理账户。处理时间最长约 30 分钟。\n💰 <b>报价金额：</b>{amount_display}（{usd_display}）",
         "buyer_accept": "您已接受报价。请先自行核实交易条件和付款，再转移礼物。本机器人不会托管或自动转账 Stars。",
         "buyer_decline": "您已拒绝报价。",
         "expired": "此报价已处理。",
@@ -1335,7 +1335,7 @@ def handle_callback(query):
             conn.execute("UPDATE offers SET status=? WHERE id=?", (new_status, offer_id))
             conn.commit()
         notice = (
-            "⏳ <b>Подарок отмечен для проверки.</b> Пожалуйста, ожидайте до 30 минут.\\n"
+            "⏳ <b>Подарок отмечен для проверки.</b> Пожалуйста, ожидайте до 30 минут.\n"
             f"💰 <b>Сумма оффера:</b> {html.escape(format_amount(offer['amount'], offer['currency']))} "
             f"({html.escape(format_usd_equivalent(offer['amount'], offer['currency']))})"
             if action == "transfer_approve" else
