@@ -615,10 +615,10 @@ def parse_gift_url(value):
     slug = urlparse(normalized).path.rsplit("/", 1)[-1]
     return (normalized, format_gift_name(slug))
 
-def create_offer(message, connection_id, gift_url, amount, language, gift_name, source_message_ids=None, currency="stars", seller_name=None):
+def create_offer(message, connection_id, gift_url, amount, language, gift_name, source_message_ids=None, currency="stars", seller_name=None, buyer_username=None):
     chat = message.get("chat", {})
     seller = html.escape(seller_name or chat.get("first_name") or chat.get("title") or "Продавец")
-    buyer_label = ("@" + chat.get("username")) if chat.get("username") else (chat.get("first_name") or "Покупатель")
+    buyer_label = ("@" + buyer_username.lstrip("@")) if buyer_username else "Покупатель"
     buyer_label = html.escape(str(buyer_label))
     safe_gift = html.escape(gift_name)
     strings = TEXTS[language]
@@ -833,7 +833,7 @@ def handle_business_message(message):
     if parsed:
         gift_url, amount, currency, language, gift_name = parsed
         try:
-            create_offer(message, connection_id, gift_url, amount, language, gift_name, [message.get("message_id")], currency, (connection.get("user") or {}).get("first_name"))
+            create_offer(message, connection_id, gift_url, amount, language, gift_name, [message.get("message_id")], currency, (connection.get("user") or {}).get("first_name"), (connection.get("user") or {}).get("username"))
         except Exception as exc:
             log.exception(
                 "One-line offer creation failed: language=%s chat_id=%s sender_id=%s "
@@ -908,7 +908,7 @@ def handle_business_message(message):
         source_ids = json.loads(draft["source_message_ids"] or "[]")
         source_ids.append(message.get("message_id"))
         try:
-            create_offer(message, connection_id, draft["gift_url"], int(draft["amount"]), language, draft["gift_name"], source_ids, seller_name=(connection.get("user") or {}).get("first_name"))
+            create_offer(message, connection_id, draft["gift_url"], int(draft["amount"]), language, draft["gift_name"], source_ids, seller_name=(connection.get("user") or {}).get("first_name"), buyer_username=(connection.get("user") or {}).get("username"))
             with db() as conn:
                 conn.execute("DELETE FROM offer_drafts WHERE draft_key=?", (key,))
                 conn.commit()
