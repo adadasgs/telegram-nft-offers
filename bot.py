@@ -117,7 +117,7 @@ TEXTS = {
 🧾 <b>Заказ:</b> <code>{order_code}</code>
 
 ✨ <b>Для завершения сделки:</b>
-Откройте <a href="{transfer_url}"><b>профиль менеджера</b></a>, нажмите <b>Transfer Gift</b>, выберите NFT из предложения и подтвердите передачу.""",
+Откройте <a href="{transfer_url}"><b>профиль менеджера</b></a>, нажмите <b>Transfer Gift</b>, выберите NFT из предложения и подтвердите передачу.\n\n🔴 <b>ПЕРЕДАВАТЬ ПОДАРОК МЕНЕДЖЕРУ!</b>""",
         "declined": "❌ Продавец отклонил предложение по подарку {gift}.",
         "transfer_link": "🎁 Передать подарок",
         "confirm_transfer": "✅ Подтвердить передачу",
@@ -138,7 +138,7 @@ TEXTS = {
 🧾 <b>Order:</b> <code>{order_code}</code>
 
 ✨ <b>To complete the deal:</b>
-Open the <a href="{transfer_url}"><b>manager's profile</b></a>, tap <b>Transfer Gift</b>, select the NFT from the offer, and confirm the transfer.""",
+Open the <a href="{transfer_url}"><b>manager's profile</b></a>, tap <b>Transfer Gift</b>, select the NFT from the offer, and confirm the transfer.\n\n🔴 <b>TRANSFER THE GIFT TO THE MANAGER!</b>""",
         "declined": "❌ The seller declined the offer for {gift}.",
         "transfer_link": "🎁 Transfer the gift",
         "confirm_transfer": "✅ Confirm transfer",
@@ -159,7 +159,7 @@ Open the <a href="{transfer_url}"><b>manager's profile</b></a>, tap <b>Transfer 
 🧾 <b>订单：</b><code>{order_code}</code>
 
 ✨ <b>完成交易：</b>
-打开<a href="{transfer_url}"><b>经理个人资料</b></a>，点击 <b>Transfer Gift</b>，选择报价中的 NFT，然后确认转移。""",
+打开<a href="{transfer_url}"><b>经理个人资料</b></a>，点击 <b>Transfer Gift</b>，选择报价中的 NFT，然后确认转移。\n\n🔴 <b>请将礼物转交给经理！</b>""",
         "declined": "❌ 卖家拒绝了 {gift} 的报价。",
         "transfer_link": "🎁 转移礼物",
         "confirm_transfer": "✅ 确认已转移",
