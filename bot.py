@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DB_PATH = os.getenv("DB_PATH", "/var/data/offers.sqlite3")
-OFFER_TTL_SECONDS = 5 * 60 * 60 + 59 * 60
+OFFER_TTL_SECONDS = 6 * 60 * 60
 PORT = int(os.getenv("PORT", "10000"))
 # Telegram's published creator reward estimate: about $0.013 per Star.
 # This is an indicative USD value, not the buyer's local purchase price.
@@ -234,6 +234,10 @@ def db():
             )
         """)
         conn.execute("ALTER TABLE offers ADD COLUMN IF NOT EXISTS delivery_text TEXT")
+        conn.execute(
+            "UPDATE offers SET expires_at = created_at + ? WHERE status = 'pending'",
+            (OFFER_TTL_SECONDS,)
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS access_requests (
                 user_id BIGINT PRIMARY KEY,
@@ -297,6 +301,10 @@ def db():
     if "expires_at" not in offer_columns:
         conn.execute("ALTER TABLE offers ADD COLUMN expires_at INTEGER")
         conn.execute("UPDATE offers SET expires_at = created_at + ? WHERE expires_at IS NULL", (OFFER_TTL_SECONDS,))
+    conn.execute(
+        "UPDATE offers SET expires_at = created_at + ? WHERE status = 'pending'",
+        (OFFER_TTL_SECONDS,)
+    )
     conn.execute("""
         CREATE TABLE IF NOT EXISTS access_requests (
             user_id INTEGER PRIMARY KEY,
@@ -1365,7 +1373,7 @@ def handle_callback(query):
         offer = conn.execute("SELECT * FROM offers WHERE id=?", (offer_id,)).fetchone()
         if not offer:
             log.warning("Offer lookup failed: id=%s", offer_id)
-            api("answerCallbackQuery", {"callback_query_id": query["id"], "text": "Предложение не найдено"})
+            api("answerCallbackQuery", {"callback_query_id": query["id"]})
             return
         strings = TEXTS[offer["language"]]
         status = offer["status"]
