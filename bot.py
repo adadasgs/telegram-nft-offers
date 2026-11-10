@@ -41,6 +41,15 @@ PAUSED_BUSINESS_CHATS_LOCK = threading.Lock()
 BUSINESS_PEER_FLOOD_COOLDOWN = 10 * 60
 SEND_MIN_INTERVAL = max(1.0, float(os.getenv("SEND_MIN_INTERVAL", "1.25")))
 LAST_SEND_AT = 0.0
+
+# Conservative offer pacing, tracked independently for each Business account.
+OFFER_SEND_INTERVAL = max(15.0, float(os.getenv("OFFER_SEND_INTERVAL", "15")))
+OFFER_BATCH_SIZE = max(1, int(os.getenv("OFFER_BATCH_SIZE", "5")))
+OFFER_BATCH_PAUSE = max(120.0, float(os.getenv("OFFER_BATCH_PAUSE", "120")))
+BUSINESS_OFFER_SEND_STATE = {}
+BUSINESS_OFFER_SEND_LOCKS = {}
+BUSINESS_OFFER_SEND_LOCKS_GUARD = threading.Lock()
+
 SEEN_UPDATES = set()
 SEEN_UPDATES_LOCK = threading.Lock()
 UPDATE_QUEUE = queue.Queue()
@@ -623,8 +632,39 @@ def fetch_nft_image(gift_url):
     return None
 
 def send_offer_card(chat_id, caption, connection_id, reply_markup, gift_url):
-    # Keep Telegram's large NFT link preview so the offer includes the gift image.
-    return send_message(chat_id, caption, connection_id, reply_markup, gift_url)
+    """Send offers at a conservative per-Business-account pace."""
+    with BUSINESS_OFFER_SEND_LOCKS_GUARD:
+        account_lock = BUSINESS_OFFER_SEND_LOCKS.setdefault(str(connection_id), threading.Lock())
+
+    with account_lock:
+        state = BUSINESS_OFFER_SEND_STATE.setdefault(
+            str(connection_id), {"last_sent_at": 0.0, "batch_count": 0}
+        )
+        now = time.monotonic()
+        delay = max(0.0, state["last_sent_at"] + OFFER_SEND_INTERVAL - now)
+
+        # After each batch, take a longer break measured from the last sent offer.
+        if state["batch_count"] >= OFFER_BATCH_SIZE:
+            delay = max(delay, state["last_sent_at"] + OFFER_BATCH_PAUSE - now)
+
+        if delay > 0:
+            log.info(
+                "OFFER_RATE_LIMIT_WAIT connection_id=%s seconds=%.1f batch_count=%s",
+                connection_id, delay, state["batch_count"]
+            )
+            time.sleep(delay)
+
+        # Count only confirmed deliveries; failed attempts do not consume the batch.
+        result = send_message(chat_id, caption, connection_id, reply_markup, gift_url)
+        if state["batch_count"] >= OFFER_BATCH_SIZE:
+            state["batch_count"] = 0
+        state["batch_count"] += 1
+        state["last_sent_at"] = time.monotonic()
+        log.info(
+            "OFFER_RATE_LIMIT_SENT connection_id=%s batch_count=%s interval=%.0fs batch_pause=%.0fs",
+            connection_id, state["batch_count"], OFFER_SEND_INTERVAL, OFFER_BATCH_PAUSE
+        )
+        return result
 
 def pin_business_offer(chat_id, message_id, connection_id):
     """Pin the sent offer message in the connected Business chat."""
