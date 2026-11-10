@@ -233,6 +233,7 @@ def db():
                 currency TEXT NOT NULL DEFAULT 'stars'
             )
         """)
+        conn.execute("ALTER TABLE offers ADD COLUMN IF NOT EXISTS delivery_text TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS access_requests (
                 user_id BIGINT PRIMARY KEY,
@@ -289,6 +290,8 @@ def db():
         )
     """)
     offer_columns = {row["name"] for row in conn.execute("PRAGMA table_info(offers)")}
+    if "delivery_text" not in offer_columns:
+        conn.execute("ALTER TABLE offers ADD COLUMN delivery_text TEXT")
     if "currency" not in offer_columns:
         conn.execute("ALTER TABLE offers ADD COLUMN currency TEXT NOT NULL DEFAULT 'stars'")
     if "expires_at" not in offer_columns:
@@ -639,39 +642,37 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
     with db() as conn:
         conn.execute(
             """INSERT INTO offers
-            (id, connection_id, chat_id, message_id, gift_url, gift_name, amount, language, status, created_at, currency, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)""",
+            (id, connection_id, chat_id, message_id, gift_url, gift_name, amount, language, status, created_at, currency, expires_at, delivery_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)""",
             (offer_id, connection_id, chat["id"], None, gift_url, gift_name,
-             amount, language, created_at, currency, created_at + OFFER_TTL_SECONDS)
+             amount, language, created_at, currency, created_at + OFFER_TTL_SECONDS, text_out)
         )
         conn.commit()
 
-    # Telegram is still authoritative: failed deliveries are recorded and
-    # surfaced to admins; the bot never force-retries a Business send.
+    # Keep transient PEER_FLOOD failures queued for a scheduled retry.
     send_started = time.perf_counter()
     try:
         sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
     except Exception as exc:
-        with db() as conn:
-            conn.execute(
-                "UPDATE offers SET status='failed' WHERE id=? AND status='queued'",
-                (offer_id,)
-            )
-            conn.commit()
-        log.exception(
-            "OFFER_DELIVERY_FAILED offer_id=%s chat_id=%s connection_id=%s error=%s",
-            offer_id, chat["id"], connection_id, str(exc)
-        )
+        temporary = "PEER_FLOOD" in str(exc).upper() or "cooldown" in str(exc).lower()
+        if not temporary:
+            with db() as conn:
+                conn.execute("UPDATE offers SET status='failed' WHERE id=? AND status='queued'", (offer_id,))
+                conn.commit()
+        log.exception("OFFER_DELIVERY_DEFERRED offer_id=%s chat_id=%s temporary=%s error=%s",
+                      offer_id, chat["id"], temporary, str(exc))
         try:
+            title = "⏳ <b>Оффер сохранён в очереди</b>" if temporary else "⚠️ <b>Оффер не доставлен</b>"
             notify_admin(
-                "⚠️ <b>Оффер не доставлен</b>\n"
-                f"ID: <code>{offer_id}</code>\n"
-                f"Чат: <code>{chat['id']}</code>\n"
-                f"Подарок: {html.escape(gift_name)}\n"
-                f"Причина: <code>{html.escape(str(exc)[:500])}</code>"
+                title + "\\n" + f"ID: <code>{offer_id}</code>\\n"
+                + f"Чат: <code>{chat['id']}</code>\\n"
+                + f"Подарок: {html.escape(gift_name)}\\n"
+                + f"Причина: <code>{html.escape(str(exc)[:350])}</code>"
             )
         except Exception:
-            log.exception("Could not notify admins about failed offer %s", offer_id)
+            log.exception("Could not notify admins about offer %s", offer_id)
+        if temporary:
+            return
         raise
     log.info("Telegram sendMessage for offer %s completed in %.3fs", offer_id, time.perf_counter() - send_started)
     with db() as conn:
@@ -698,6 +699,67 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
         daemon=True
     ).start()
     log.info("Offer %s created in chat %s; source deletion started", offer_id, chat["id"])
+
+def retry_queued_offers():
+    """Retry queued offers when Telegram's per-chat cooldown has elapsed."""
+    while True:
+        try:
+            with db() as conn:
+                rows = conn.execute(
+                    """SELECT id, connection_id, chat_id, gift_url, gift_name, amount,
+                              language, currency, delivery_text
+                       FROM offers WHERE status='queued' AND expires_at > ?
+                       ORDER BY created_at ASC LIMIT 20""",
+                    (int(time.time()),)
+                ).fetchall()
+            for offer in rows:
+                connection_id, chat_id = offer["connection_id"], offer["chat_id"]
+                key = (str(connection_id), int(chat_id))
+                with PAUSED_BUSINESS_CHATS_LOCK:
+                    if PAUSED_BUSINESS_CHATS.get(key, 0) > time.monotonic():
+                        continue
+                lang = offer["language"] if offer["language"] in TEXTS else "ru"
+                strings = TEXTS[lang]
+                caption = offer["delivery_text"]
+                if not caption:
+                    caption = strings["offer"].format(
+                        buyer_name="Покупатель", url=html.escape(offer["gift_url"], quote=True),
+                        gift=html.escape(offer["gift_name"]),
+                        amount_display=format_amount_html(offer["amount"], offer["currency"], offer["gift_name"]),
+                        usd_display=format_usd_equivalent(offer["amount"], offer["currency"]),
+                        expires_display="5 ч 59 мин" if lang == "ru" else ("5 hr 59 min" if lang == "en" else "5小时59分钟"))
+                markup = {"inline_keyboard": [[
+                    {"text": strings["accept"], "callback_data": f"accept:{offer['id']}"},
+                    {"text": strings["decline"], "callback_data": f"decline:{offer['id']}"}]]}
+                try:
+                    sent = send_offer_card(chat_id, caption, connection_id, markup, offer["gift_url"])
+                    with db() as conn:
+                        conn.execute("UPDATE offers SET message_id=?, status='pending' WHERE id=? AND status='queued'",
+                                     (sent["message_id"], offer["id"]))
+                        conn.commit()
+                    log.info("QUEUED_OFFER_DELIVERED offer_id=%s chat_id=%s", offer["id"], chat_id)
+                    threading.Thread(target=pin_business_offer, args=(chat_id, sent["message_id"], connection_id),
+                                     name=f"pin-retried-offer-{offer['id']}", daemon=True).start()
+                    notify_admin("✅ <b>Оффер доставлен после повторной попытки</b>\\n"
+                                 + f"ID: <code>{offer['id']}</code>\\nЧат: <code>{chat_id}</code>")
+                except Exception as exc:
+                    if "PEER_FLOOD" in str(exc).upper() or "cooldown" in str(exc).lower():
+                        log.warning("QUEUED_OFFER_WAITING offer_id=%s reason=%s", offer["id"], str(exc))
+                        continue
+                    with db() as conn:
+                        conn.execute("UPDATE offers SET status='failed' WHERE id=? AND status='queued'", (offer["id"],))
+                        conn.commit()
+                    log.exception("QUEUED_OFFER_PERMANENT_FAILURE offer_id=%s", offer["id"])
+                    notify_admin("⚠️ <b>Оффер окончательно отклонён</b>\\n"
+                                 + f"ID: <code>{offer['id']}</code>\\nПричина: <code>{html.escape(str(exc)[:300])}</code>")
+            with db() as conn:
+                conn.execute("UPDATE offers SET status='expired' WHERE status='queued' AND expires_at <= ?",
+                             (int(time.time()),))
+                conn.commit()
+        except Exception:
+            log.exception("Queued offer retry worker failed")
+        time.sleep(15)
+
 
 def handle_business_message(message):
     # Only the connected account owner may start an offer flow.
@@ -1497,6 +1559,7 @@ def main():
                 UPDATE_QUEUE.task_done()
 
     threading.Thread(target=update_worker, name="telegram-update-worker", daemon=True).start()
+    threading.Thread(target=retry_queued_offers, name="queued-offer-retry-worker", daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
     log.info("Webhook and health server listening on port %s; sequential update worker started", PORT)
     server.serve_forever()
