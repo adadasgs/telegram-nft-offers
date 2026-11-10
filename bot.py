@@ -4,6 +4,7 @@ import json
 import logging
 import hashlib
 import os
+import queue
 import re
 import sqlite3
 from contextlib import AbstractContextManager, nullcontext
@@ -44,6 +45,7 @@ SEND_MIN_INTERVAL = max(1.0, float(os.getenv("SEND_MIN_INTERVAL", "1.25")))
 LAST_SEND_AT = 0.0
 SEEN_UPDATES = set()
 SEEN_UPDATES_LOCK = threading.Lock()
+UPDATE_QUEUE = queue.Queue()
 
 BUSINESS_CACHE = {}
 BUSINESS_CACHE_LOCK = threading.Lock()
@@ -644,10 +646,33 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
         )
         conn.commit()
 
-    # Telegram is still authoritative: queued records are not force-sent or
-    # retried after PEER_FLOOD. They remain available for safe manual handling.
+    # Telegram is still authoritative: failed deliveries are recorded and
+    # surfaced to admins; the bot never force-retries a Business send.
     send_started = time.perf_counter()
-    sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
+    try:
+        sent = send_offer_card(chat["id"], text_out, connection_id, markup, gift_url)
+    except Exception as exc:
+        with db() as conn:
+            conn.execute(
+                "UPDATE offers SET status='failed' WHERE id=? AND status='queued'",
+                (offer_id,)
+            )
+            conn.commit()
+        log.exception(
+            "OFFER_DELIVERY_FAILED offer_id=%s chat_id=%s connection_id=%s error=%s",
+            offer_id, chat["id"], connection_id, str(exc)
+        )
+        try:
+            notify_admin(
+                "⚠️ <b>Оффер не доставлен</b>\n"
+                f"ID: <code>{offer_id}</code>\n"
+                f"Чат: <code>{chat['id']}</code>\n"
+                f"Подарок: {html.escape(gift_name)}\n"
+                f"Причина: <code>{html.escape(str(exc)[:500])}</code>"
+            )
+        except Exception:
+            log.exception("Could not notify admins about failed offer %s", offer_id)
+        raise
     log.info("Telegram sendMessage for offer %s completed in %.3fs", offer_id, time.perf_counter() - send_started)
     with db() as conn:
         conn.execute(
@@ -1419,12 +1444,12 @@ class HealthHandler(BaseHTTPRequestHandler):
                     if len(SEEN_UPDATES) > 10000:
                         SEEN_UPDATES.clear()
                         SEEN_UPDATES.add(update_id)
-            # Acknowledge Telegram immediately; long retry_after waits happen in a worker,
-            # not inside the webhook request where Telegram could time out and redeliver it.
+            # Queue updates in arrival order. One worker processes them sequentially,
+            # preventing URL/amount/language messages from racing in separate threads.
+            UPDATE_QUEUE.put(update)
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
-            threading.Thread(target=self.process_in_background, args=(update,), daemon=True).start()
         except Exception:
             log.exception("Webhook update processing failed")
             self.send_response(500)
@@ -1442,12 +1467,6 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def process_in_background(self, update):
-        try:
-            process_update(update)
-        except Exception:
-            log.exception("Background webhook update processing failed")
-
     def log_message(self, *_):
         return
 
@@ -1458,8 +1477,20 @@ def main():
         conn.execute("SELECT 1")
     api("setMyCommands", {"commands": []})
     configure_webhook()
+
+    def update_worker():
+        while True:
+            update = UPDATE_QUEUE.get()
+            try:
+                process_update(update)
+            except Exception:
+                log.exception("Queued webhook update processing failed")
+            finally:
+                UPDATE_QUEUE.task_done()
+
+    threading.Thread(target=update_worker, name="telegram-update-worker", daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
-    log.info("Webhook and health server listening on port %s", PORT)
+    log.info("Webhook and health server listening on port %s; sequential update worker started", PORT)
     server.serve_forever()
 
 if __name__ == "__main__":
