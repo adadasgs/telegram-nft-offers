@@ -34,8 +34,7 @@ API_LOCK = threading.RLock()
 # Serialize outbound messages and keep a conservative global pace.
 SEND_MESSAGE_LOCK = threading.Lock()
 # Cool down only the Business chat that received PEER_FLOOD.
-# A fresh user-initiated offer may be attempted again after the cooldown;
-# no background retry is performed.
+# Business messages are held in durable queues and retried after the cooldown.
 PAUSED_BUSINESS_CHATS = {}
 PAUSED_BUSINESS_CHATS_LOCK = threading.Lock()
 BUSINESS_PEER_FLOOD_COOLDOWN = max(
@@ -268,6 +267,16 @@ def db():
                 source_message_ids TEXT NOT NULL DEFAULT '[]'
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS business_message_queue (
+                id TEXT PRIMARY KEY,
+                connection_id TEXT NOT NULL,
+                chat_id BIGINT NOT NULL,
+                text TEXT NOT NULL,
+                created_at BIGINT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
+            )
+        """)
         conn.commit()
         return conn
 
@@ -338,6 +347,16 @@ def db():
     draft_columns = {row["name"] for row in conn.execute("PRAGMA table_info(offer_drafts)")}
     if "source_message_ids" not in draft_columns:
         conn.execute("ALTER TABLE offer_drafts ADD COLUMN source_message_ids TEXT NOT NULL DEFAULT '[]'")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS business_message_queue (
+            id TEXT PRIMARY KEY,
+            connection_id TEXT NOT NULL,
+            chat_id INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0
+        )
+    """)
     conn.commit()
     return conn
 
@@ -461,6 +480,72 @@ def send_message(chat_id, text, connection_id=None, reply_markup=None, link_prev
     else:
         payload["link_preview_options"] = {"is_disabled": True}
     return api("sendMessage", payload)
+
+def queue_business_reply(chat_id, text, connection_id):
+    """Persist a Business reply when Telegram temporarily refuses delivery."""
+    message_id = uuid.uuid4().hex[:16]
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO business_message_queue
+               (id, connection_id, chat_id, text, created_at, attempts)
+               VALUES (?, ?, ?, ?, ?, 0)
+               ON CONFLICT(id) DO NOTHING""",
+            (message_id, connection_id, int(chat_id), text, int(time.time()))
+        )
+        conn.commit()
+    log.warning("BUSINESS_REPLY_QUEUED id=%s connection_id=%s chat_id=%s",
+                message_id, connection_id, chat_id)
+
+
+def send_business_reply(chat_id, text, connection_id):
+    """Send now, or persist the reply instead of dropping the webhook update."""
+    try:
+        return send_message(chat_id, text, connection_id)
+    except Exception as exc:
+        reason = str(exc).upper()
+        if "PEER_FLOOD" not in reason and "COOLDOWN" not in reason:
+            raise
+        queue_business_reply(chat_id, text, connection_id)
+        return None
+
+
+def retry_business_message_queue():
+    """Deliver persisted Business replies only when the chat cooldown permits."""
+    while True:
+        try:
+            with db() as conn:
+                rows = conn.execute(
+                    """SELECT id, connection_id, chat_id, text, attempts
+                       FROM business_message_queue ORDER BY created_at ASC LIMIT 25"""
+                ).fetchall()
+            for row in rows:
+                key = (str(row["connection_id"]), int(row["chat_id"]))
+                with PAUSED_BUSINESS_CHATS_LOCK:
+                    if PAUSED_BUSINESS_CHATS.get(key, 0) > time.monotonic():
+                        continue
+                try:
+                    send_message(row["chat_id"], row["text"], row["connection_id"])
+                    with db() as conn:
+                        conn.execute("DELETE FROM business_message_queue WHERE id=?", (row["id"],))
+                        conn.commit()
+                    log.info("BUSINESS_REPLY_DELIVERED id=%s chat_id=%s", row["id"], row["chat_id"])
+                except Exception as exc:
+                    if "PEER_FLOOD" in str(exc).upper() or "COOLDOWN" in str(exc).upper():
+                        with db() as conn:
+                            conn.execute("UPDATE business_message_queue SET attempts=attempts+1 WHERE id=?",
+                                         (row["id"],))
+                            conn.commit()
+                        log.warning("BUSINESS_REPLY_WAITING id=%s attempts=%s reason=%s",
+                                    row["id"], row["attempts"] + 1, str(exc))
+                        continue
+                    log.exception("BUSINESS_REPLY_FAILED id=%s", row["id"])
+                    with db() as conn:
+                        conn.execute("DELETE FROM business_message_queue WHERE id=?", (row["id"],))
+                        conn.commit()
+        except Exception:
+            log.exception("Business message retry worker failed")
+        time.sleep(15)
+
 
 def fetch_nft_image(gift_url):
     """Try to read the public Telegram NFT page's Open Graph image."""
@@ -856,7 +941,7 @@ def handle_business_message(message):
                     log.exception("Could not collect Business connection context after PEER_FLOOD")
             if "PEER_FLOOD" not in str(exc).upper():
                 try:
-                    send_message(chat_id, "❌ Telegram отклонил отправку оффера. Проверьте журнал Render; повторные попытки подряд не делайте.", connection_id)
+                    send_business_reply(chat_id, "❌ Telegram временно ограничил отправку. Оффер сохранён; попробуем доставить сообщение позже.", connection_id)
                 except Exception:
                     log.exception("Could not send offer failure notice to business chat %s", chat_id)
         return
@@ -877,7 +962,7 @@ def handle_business_message(message):
             """, (key, connection_id, chat_id, gift_url, gift_name,
                   int(time.time()), json.dumps([message.get("message_id")])))
             conn.commit()
-        send_message(chat_id, "Ссылка на NFT получена. Теперь отправь сумму в Stars отдельным сообщением, например: 2300", connection_id)
+        send_business_reply(chat_id, "Ссылка на NFT получена. Теперь отправь сумму в Stars отдельным сообщением, например: 2300", connection_id)
         return
 
     with db() as conn:
@@ -885,12 +970,12 @@ def handle_business_message(message):
 
     if not draft:
         if "t.me/nft/" in text:
-            send_message(chat_id, "Не удалось распознать ссылку. Отправь прямую ссылку вида https://t.me/nft/SnoopCigar-84846", connection_id)
+            send_business_reply(chat_id, "Не удалось распознать ссылку. Отправь прямую ссылку вида https://t.me/nft/SnoopCigar-84846", connection_id)
         return
 
     if draft["stage"] == "amount":
         if not re.fullmatch(r"[1-9][0-9]{0,17}", text):
-            send_message(chat_id, "Укажи сумму только цифрами, например: 2300", connection_id)
+            send_business_reply(chat_id, "Укажи сумму только цифрами, например: 2300", connection_id)
             return
         amount = int(text)
         with db() as conn:
@@ -899,7 +984,7 @@ def handle_business_message(message):
             conn.execute("UPDATE offer_drafts SET amount=?, stage='language', updated_at=?, source_message_ids=? WHERE draft_key=?",
                          (amount, int(time.time()), json.dumps(source_ids), key))
             conn.commit()
-        send_message(chat_id, "Сумма получена. Теперь отправь язык оффера: ru, en или zh", connection_id)
+        send_business_reply(chat_id, "Сумма получена. Теперь отправь язык оффера: ru, en или zh", connection_id)
         return
 
     if draft["stage"] == "language":
@@ -911,7 +996,7 @@ def handle_business_message(message):
         }
         language = language_aliases.get(language_input, language_input)
         if language not in TEXTS:
-            send_message(chat_id, "Выбери язык: ru, en или zh.", connection_id)
+            send_business_reply(chat_id, "Выбери язык: ru, en или zh.", connection_id)
             return
         source_ids = json.loads(draft["source_message_ids"] or "[]")
         source_ids.append(message.get("message_id"))
@@ -934,7 +1019,7 @@ def handle_business_message(message):
                     log.exception("Could not collect Business connection context after PEER_FLOOD")
             if "PEER_FLOOD" not in str(exc).upper():
                 try:
-                    send_message(chat_id, "❌ Telegram отклонил отправку оффера. Проверьте журнал Render; повторные попытки подряд не делайте.", connection_id)
+                    send_business_reply(chat_id, "❌ Telegram временно ограничил отправку. Оффер сохранён; попробуем доставить сообщение позже.", connection_id)
                 except Exception:
                     log.exception("Could not send offer failure notice to business chat %s", chat_id)
 
@@ -1577,6 +1662,7 @@ def main():
 
     threading.Thread(target=update_worker, name="telegram-update-worker", daemon=True).start()
     threading.Thread(target=retry_queued_offers, name="queued-offer-retry-worker", daemon=True).start()
+    threading.Thread(target=retry_business_message_queue, name="business-message-retry-worker", daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
     log.info("Webhook and health server listening on port %s; sequential update worker started", PORT)
     server.serve_forever()
