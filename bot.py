@@ -37,9 +37,8 @@ SEND_MESSAGE_LOCK = threading.Lock()
 # Business messages are held in durable queues and retried after the cooldown.
 PAUSED_BUSINESS_CHATS = {}
 PAUSED_BUSINESS_CHATS_LOCK = threading.Lock()
-BUSINESS_PEER_FLOOD_COOLDOWN = max(
-    300, int(os.getenv("BUSINESS_PEER_FLOOD_COOLDOWN", "3600"))
-)
+# Retry after a shorter local cooldown; Telegram may still reject the next attempt.
+BUSINESS_PEER_FLOOD_COOLDOWN = 10 * 60
 SEND_MIN_INTERVAL = max(1.0, float(os.getenv("SEND_MIN_INTERVAL", "1.25")))
 LAST_SEND_AT = 0.0
 SEEN_UPDATES = set()
@@ -277,6 +276,14 @@ def db():
                 attempts INTEGER NOT NULL DEFAULT 0
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS business_chat_cooldowns (
+                connection_id TEXT NOT NULL,
+                chat_id BIGINT NOT NULL,
+                paused_until BIGINT NOT NULL,
+                PRIMARY KEY (connection_id, chat_id)
+            )
+        """)
         conn.commit()
         return conn
 
@@ -357,8 +364,43 @@ def db():
             attempts INTEGER NOT NULL DEFAULT 0
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS business_chat_cooldowns (
+            connection_id TEXT NOT NULL,
+            chat_id INTEGER NOT NULL,
+            paused_until INTEGER NOT NULL,
+            PRIMARY KEY (connection_id, chat_id)
+        )
+    """)
     conn.commit()
     return conn
+
+def business_pause_remaining(connection_id, chat_id):
+    """Read the persisted Telegram PEER_FLOOD pause for one Business chat."""
+    if not connection_id or chat_id is None:
+        return 0
+    with db() as conn:
+        row = conn.execute(
+            "SELECT paused_until FROM business_chat_cooldowns WHERE connection_id=? AND chat_id=?",
+            (str(connection_id), int(chat_id))
+        ).fetchone()
+    return max(0, int(row["paused_until"]) - int(time.time())) if row else 0
+
+
+def record_business_pause(connection_id, chat_id):
+    """Persist a conservative cooldown so a Render restart cannot erase it."""
+    paused_until = int(time.time()) + BUSINESS_PEER_FLOOD_COOLDOWN
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO business_chat_cooldowns (connection_id, chat_id, paused_until)
+               VALUES (?, ?, ?)
+               ON CONFLICT(connection_id, chat_id) DO UPDATE SET
+               paused_until=excluded.paused_until""",
+            (str(connection_id), int(chat_id), paused_until)
+        )
+        conn.commit()
+    return paused_until
+
 
 def api(method, payload=None):
     global LAST_SEND_AT
@@ -376,6 +418,13 @@ def api(method, payload=None):
     with send_guard:
         if method == "sendMessage":
             if business_key:
+                # Persisted wall-clock cooldown survives Render restarts.
+                remaining = business_pause_remaining(business_connection_id, business_chat_id)
+                if remaining > 0:
+                    raise RuntimeError(
+                        f"Business chat is in PEER_FLOOD cooldown for {remaining}s; "
+                        "message remains queued for retry."
+                    )
                 with PAUSED_BUSINESS_CHATS_LOCK:
                     paused_until = PAUSED_BUSINESS_CHATS.get(business_key, 0)
                     now = time.monotonic()
@@ -383,7 +432,7 @@ def api(method, payload=None):
                         remaining = int(paused_until - now)
                         raise RuntimeError(
                             f"Business chat is in PEER_FLOOD cooldown for {remaining}s; "
-                            "send was not retried."
+                            "message remains queued for retry."
                         )
                     if paused_until:
                         PAUSED_BUSINESS_CHATS.pop(business_key, None)
@@ -401,6 +450,7 @@ def api(method, payload=None):
                 except HTTPError as exc:
                     detail = exc.read().decode("utf-8", "replace")
                     if method == "sendMessage" and business_key and "PEER_FLOOD" in detail.upper():
+                        record_business_pause(business_connection_id, business_chat_id)
                         with PAUSED_BUSINESS_CHATS_LOCK:
                             PAUSED_BUSINESS_CHATS[business_key] = (
                                 time.monotonic() + BUSINESS_PEER_FLOOD_COOLDOWN
@@ -433,6 +483,7 @@ def api(method, payload=None):
                 if not data.get("ok"):
                     detail = json.dumps(data, ensure_ascii=False)
                     if method == "sendMessage" and business_key and "PEER_FLOOD" in detail.upper():
+                        record_business_pause(business_connection_id, business_chat_id)
                         with PAUSED_BUSINESS_CHATS_LOCK:
                             PAUSED_BUSINESS_CHATS[business_key] = (
                                 time.monotonic() + BUSINESS_PEER_FLOOD_COOLDOWN
