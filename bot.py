@@ -23,7 +23,7 @@ PORT = int(os.getenv("PORT", "10000"))
 # Telegram's published creator reward estimate: about $0.013 per Star.
 # This is an indicative USD value, not the buyer's local purchase price.
 STAR_USD_RATE = float(os.getenv("STAR_USD_RATE", "0.013"))
-TRANSFER_URL = os.getenv("TRANSFER_URL", "https://t.me/Autooffersgift")
+TRANSFER_URL = "tg://send_gift?to=Autooffersgift"
 ADMIN_ID = 9189255415
 ADMIN_IDS = {ADMIN_ID, 6199869526, 8560405477}
 PREAPPROVED_OWNER_IDS = {8756303914, 8770529636}
