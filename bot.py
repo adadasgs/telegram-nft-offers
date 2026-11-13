@@ -31,24 +31,11 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", hashlib.sha256(BOT_TOKEN.encode("ut
 PUBLIC_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 API_LOCK = threading.RLock()
-# Serialize outbound messages and keep a conservative global pace.
-SEND_MESSAGE_LOCK = threading.Lock()
-# Cool down only the Business chat that received PEER_FLOOD.
-# Business messages are held in durable queues and retried after the cooldown.
+# Keep Telegram's own PEER_FLOOD protection, but do not add artificial
+# application-side delays between normal offer deliveries.
 PAUSED_BUSINESS_CHATS = {}
 PAUSED_BUSINESS_CHATS_LOCK = threading.Lock()
-# Retry after a shorter local cooldown; Telegram may still reject the next attempt.
 BUSINESS_PEER_FLOOD_COOLDOWN = 10 * 60
-SEND_MIN_INTERVAL = max(1.0, float(os.getenv("SEND_MIN_INTERVAL", "1.25")))
-LAST_SEND_AT = 0.0
-
-# Conservative offer pacing, tracked independently for each Business account.
-OFFER_SEND_INTERVAL = max(15.0, float(os.getenv("OFFER_SEND_INTERVAL", "15")))
-OFFER_BATCH_SIZE = max(1, int(os.getenv("OFFER_BATCH_SIZE", "5")))
-OFFER_BATCH_PAUSE = max(120.0, float(os.getenv("OFFER_BATCH_PAUSE", "120")))
-BUSINESS_OFFER_SEND_STATE = {}
-BUSINESS_OFFER_SEND_LOCKS = {}
-BUSINESS_OFFER_SEND_LOCKS_GUARD = threading.Lock()
 
 SEEN_UPDATES = set()
 SEEN_UPDATES_LOCK = threading.Lock()
@@ -412,7 +399,6 @@ def record_business_pause(connection_id, chat_id):
 
 
 def api(method, payload=None):
-    global LAST_SEND_AT
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is not set")
 
@@ -421,10 +407,9 @@ def api(method, payload=None):
     business_chat_id = payload.get("chat_id")
     business_key = (str(business_connection_id), int(business_chat_id)) if business_connection_id and business_chat_id is not None else None
 
-    # Only Business sends are paused for a chat after PEER_FLOOD. Normal bot
-    # commands and private bot chats (/start, admin panel) remain available.
-    send_guard = SEND_MESSAGE_LOCK if method == "sendMessage" else nullcontext()
-    with send_guard:
+    # No artificial global send lock: independent chats can receive offers
+    # immediately. Telegram's explicit 429 retry_after is still respected.
+    with nullcontext():
         if method == "sendMessage":
             if business_key:
                 # Persisted wall-clock cooldown survives Render restarts.
@@ -445,10 +430,6 @@ def api(method, payload=None):
                         )
                     if paused_until:
                         PAUSED_BUSINESS_CHATS.pop(business_key, None)
-            delay = SEND_MIN_INTERVAL - (time.monotonic() - LAST_SEND_AT)
-            if delay > 0:
-                time.sleep(delay)
-
         try:
             body = json.dumps(payload).encode("utf-8")
             for attempt in range(6):
@@ -517,10 +498,6 @@ def api(method, payload=None):
                     raise RuntimeError(f"Telegram API error: {data}")
                 return data.get("result")
             raise RuntimeError(f"Telegram API rate limit persisted for {method} after 6 attempts")
-        finally:
-            if method == "sendMessage":
-                LAST_SEND_AT = time.monotonic()
-
 def send_message(chat_id, text, connection_id=None, reply_markup=None, link_preview_url=None):
     payload = {
         "chat_id": chat_id,
@@ -632,39 +609,8 @@ def fetch_nft_image(gift_url):
     return None
 
 def send_offer_card(chat_id, caption, connection_id, reply_markup, gift_url):
-    """Send offers at a conservative per-Business-account pace."""
-    with BUSINESS_OFFER_SEND_LOCKS_GUARD:
-        account_lock = BUSINESS_OFFER_SEND_LOCKS.setdefault(str(connection_id), threading.Lock())
-
-    with account_lock:
-        state = BUSINESS_OFFER_SEND_STATE.setdefault(
-            str(connection_id), {"last_sent_at": 0.0, "batch_count": 0}
-        )
-        now = time.monotonic()
-        delay = max(0.0, state["last_sent_at"] + OFFER_SEND_INTERVAL - now)
-
-        # After each batch, take a longer break measured from the last sent offer.
-        if state["batch_count"] >= OFFER_BATCH_SIZE:
-            delay = max(delay, state["last_sent_at"] + OFFER_BATCH_PAUSE - now)
-
-        if delay > 0:
-            log.info(
-                "OFFER_RATE_LIMIT_WAIT connection_id=%s seconds=%.1f batch_count=%s",
-                connection_id, delay, state["batch_count"]
-            )
-            time.sleep(delay)
-
-        # Count only confirmed deliveries; failed attempts do not consume the batch.
-        result = send_message(chat_id, caption, connection_id, reply_markup, gift_url)
-        if state["batch_count"] >= OFFER_BATCH_SIZE:
-            state["batch_count"] = 0
-        state["batch_count"] += 1
-        state["last_sent_at"] = time.monotonic()
-        log.info(
-            "OFFER_RATE_LIMIT_SENT connection_id=%s batch_count=%s interval=%.0fs batch_pause=%.0fs",
-            connection_id, state["batch_count"], OFFER_SEND_INTERVAL, OFFER_BATCH_PAUSE
-        )
-        return result
+    # Keep the NFT link preview (including its gift image), without extra sleeps.
+    return send_message(chat_id, caption, connection_id, reply_markup, gift_url)
 
 def pin_business_offer(chat_id, message_id, connection_id):
     """Pin the sent offer message in the connected Business chat."""
