@@ -510,6 +510,8 @@ def api(method, payload=None):
                     raise RuntimeError(f"Telegram API error: {data}")
                 return data.get("result")
             raise RuntimeError(f"Telegram API rate limit persisted for {method} after 6 attempts")
+        except Exception:
+            raise
 def send_message(chat_id, text, connection_id=None, reply_markup=None, link_preview_url=None):
     payload = {
         "chat_id": chat_id,
