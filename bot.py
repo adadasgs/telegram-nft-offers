@@ -119,8 +119,8 @@ TEXTS = {
         "buyer_accept": "Вы приняли предложение. Отправьте подарок покупателю только после проверки условий и получения оплаты самостоятельно. Автоматического удержания или перевода Stars этот бот не выполняет.",
         "buyer_decline": "Вы отклонили предложение.",
         "expired": "Это предложение уже обработано.",
-        "bad": "Формат не распознан.\nОтправьте одной строкой:\nhttps://t.me/nft/НазваниеПодарка-12345 2300 ru\n\nПоследний параметр: ru, en или zh.",
-        "help": "Бот работает в подключённых чатах Telegram Business. Отправьте в чате с продавцом одну строку:\n<code>SnoopCigar-84846 2300 ru</code>\n\nСначала подключите бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты и разрешите ему получать и отправлять сообщения."
+        "bad": "Формат не распознан.\nОтправьте одной строкой:\n+1 https://t.me/nft/НазваниеПодарка-12345 2300 ru\n\nПоследний параметр: ru, en или zh.",
+        "help": "Бот работает в подключённых чатах Telegram Business. Отправьте в чате с продавцом одну строку:\n<code>+1 SnoopCigar-84846 2300 ru</code>\n\nСначала подключите бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты и разрешите ему получать и отправлять сообщения."
     },
     "en": {
         "offer": "👤 <b>{buyer_name}</b> offers to buy your NFT gift:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Offer:</b> {amount_display} <b>({usd_display})</b>\n⏳ <b>Offer valid for:</b> {expires_display}\n\n<i>Choose an action below.</i>",
@@ -140,7 +140,7 @@ Open the <a href="{transfer_url}"><b>manager's profile</b></a>, tap <b>Transfer 
         "buyer_accept": "You accepted the offer. Transfer the gift only after independently checking the terms and payment. This bot does not hold or automatically transfer Stars.",
         "buyer_decline": "You declined the offer.",
         "expired": "This offer has already been processed.",
-        "bad": "I couldn't parse that line.\nSend one line in this format:\nSnoopCigar-84846 2300 en\n\nLanguage: ru, en, or zh.",
+        "bad": "I couldn't parse that line.\nSend one line in this format:\n+1 SnoopCigar-84846 2300 en\n\nLanguage: ru, en, or zh.",
         "help": "Use this bot in a connected Telegram Business chat. Send one line in the seller's chat:\n<code>SnoopCigar-84846 2300 en</code>\n\nConnect the bot in Telegram → Settings → Telegram Business → Chatbots and grant permission to receive and send messages."
     },
     "zh": {
@@ -161,7 +161,7 @@ Open the <a href="{transfer_url}"><b>manager's profile</b></a>, tap <b>Transfer 
         "buyer_accept": "您已接受报价。请先自行核实交易条件和付款，再转移礼物。本机器人不会托管或自动转账 Stars。",
         "buyer_decline": "您已拒绝报价。",
         "expired": "此报价已处理。",
-        "bad": "无法识别格式。\n请发送一行，格式如下：\nSnoopCigar-84846 2300 zh\n\n语言：ru、en 或 zh。",
+        "bad": "无法识别格式。\n请发送一行，格式如下：\n+1 SnoopCigar-84846 2300 zh\n\n语言：ru、en 或 zh。",
         "help": "请在已连接的 Telegram Business 聊天中使用。向卖家发送一行：\n<code>SnoopCigar-84846 2300 zh</code>\n\n在 Telegram → 设置 → Telegram Business → 聊天机器人中连接本机器人，并授予接收和发送消息的权限。"
     }
 }
@@ -710,6 +710,10 @@ def normalize_nft_url(value):
 
 def parse_offer(text):
     parts = (text or "").strip().split()
+    # Optional leading marker used in the requested command format:
+    # +1 SignetRing-9041 1200 ru
+    if parts and parts[0] == "+1":
+        parts = parts[1:]
     if len(parts) == 3:
         url, amount_text, language = parts
         currency = "stars"
