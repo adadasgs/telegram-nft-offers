@@ -422,7 +422,7 @@ def api(method, payload=None):
     # No artificial global send lock: independent chats can receive offers
     # immediately. Telegram's explicit 429 retry_after is still respected.
     with nullcontext():
-        if method == "sendMessage":
+        if method in ("sendMessage", "sendPhoto"):
             if business_key:
                 # Persisted wall-clock cooldown survives Render restarts.
                 remaining = business_pause_remaining(business_connection_id, business_chat_id)
@@ -451,7 +451,7 @@ def api(method, payload=None):
                         data = json.loads(response.read().decode("utf-8"))
                 except HTTPError as exc:
                     detail = exc.read().decode("utf-8", "replace")
-                    if method == "sendMessage" and business_key and "PEER_FLOOD" in detail.upper():
+                    if method in ("sendMessage", "sendPhoto") and business_key and "PEER_FLOOD" in detail.upper():
                         record_business_pause(business_connection_id, business_chat_id)
                         with PAUSED_BUSINESS_CHATS_LOCK:
                             PAUSED_BUSINESS_CHATS[business_key] = (
@@ -484,7 +484,7 @@ def api(method, payload=None):
 
                 if not data.get("ok"):
                     detail = json.dumps(data, ensure_ascii=False)
-                    if method == "sendMessage" and business_key and "PEER_FLOOD" in detail.upper():
+                    if method in ("sendMessage", "sendPhoto") and business_key and "PEER_FLOOD" in detail.upper():
                         record_business_pause(business_connection_id, business_chat_id)
                         with PAUSED_BUSINESS_CHATS_LOCK:
                             PAUSED_BUSINESS_CHATS[business_key] = (
@@ -621,8 +621,40 @@ def fetch_nft_image(gift_url):
     return None
 
 def send_offer_card(chat_id, caption, connection_id, reply_markup, gift_url):
-    # Keep the NFT link preview (including its gift image), without extra sleeps.
-    return send_message(chat_id, caption, connection_id, reply_markup, gift_url)
+    """Send a real NFT image card when Telegram exposes an OG image; safely fall back to text."""
+    image_url = fetch_nft_image(gift_url)
+    if image_url and len(caption) <= 1024:
+        payload = {
+            "chat_id": chat_id,
+            "photo": image_url,
+            "caption": caption,
+            "parse_mode": "HTML",
+            "reply_markup": reply_markup
+        }
+        if connection_id:
+            payload["business_connection_id"] = connection_id
+        try:
+            sent = api("sendPhoto", payload)
+            log.info("OFFER_PHOTO_SENT chat_id=%s image_found=True message_id=%s",
+                     chat_id, sent.get("message_id"))
+            return sent
+        except Exception as exc:
+            # PEER_FLOOD applies to the Business chat: do not immediately retry
+            # with sendMessage and trigger another blocked delivery attempt.
+            if "PEER_FLOOD" in str(exc).upper() or "COOLDOWN" in str(exc).upper():
+                raise
+            log.warning("OFFER_PHOTO_FAILED chat_id=%s error=%s; falling back to text",
+                        chat_id, str(exc)[:300])
+    elif image_url:
+        log.warning("OFFER_PHOTO_SKIPPED caption_too_long chat_id=%s length=%s",
+                    chat_id, len(caption))
+    else:
+        log.info("OFFER_PHOTO_UNAVAILABLE chat_id=%s; using Telegram link preview", chat_id)
+
+    sent = send_message(chat_id, caption, connection_id, reply_markup, gift_url)
+    log.info("OFFER_TEXT_FALLBACK_SENT chat_id=%s message_id=%s",
+             chat_id, sent.get("message_id"))
+    return sent
 
 def pin_business_offer(chat_id, message_id, connection_id):
     """Pin the sent offer message in the connected Business chat."""
@@ -820,7 +852,7 @@ def create_offer(message, connection_id, gift_url, amount, language, gift_name, 
         if temporary:
             return
         raise
-    log.info("Telegram sendMessage for offer %s completed in %.3fs", offer_id, time.perf_counter() - send_started)
+    log.info("OFFER_DELIVERED offer_id=%s method=%s message_id=%s elapsed=%.3fs", offer_id, "photo" if sent.get("photo") else "text", sent.get("message_id"), time.perf_counter() - send_started)
     with db() as conn:
         conn.execute(
             "UPDATE offers SET message_id=?, status='pending' WHERE id=? AND status='queued'",
