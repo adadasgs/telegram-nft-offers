@@ -45,6 +45,14 @@ BUSINESS_CACHE = {}
 BUSINESS_CACHE_LOCK = threading.Lock()
 BUSINESS_CACHE_TTL = 3600
 
+# Telegram recommends no more than one message per second in the same chat.
+# Business sends may come from the webhook worker and both retry workers, so
+# serialize them per (connection, chat) and enforce the interval centrally.
+BUSINESS_SEND_LOCKS = {}
+BUSINESS_SEND_LOCKS_LOCK = threading.Lock()
+BUSINESS_LAST_SEND_AT = {}
+BUSINESS_SEND_INTERVAL_SECONDS = 1.1
+
 def business_diagnostic(connection_id):
     """Return safe Telegram Business connection metadata; never logs tokens or message text."""
     connection = api("getBusinessConnection", {"business_connection_id": connection_id})
@@ -410,6 +418,17 @@ def record_business_pause(connection_id, chat_id):
     return paused_until
 
 
+def business_send_context(method, business_key):
+    if method not in ("sendMessage", "sendPhoto") or not business_key:
+        return nullcontext()
+    with BUSINESS_SEND_LOCKS_LOCK:
+        lock = BUSINESS_SEND_LOCKS.get(business_key)
+        if lock is None:
+            lock = threading.Lock()
+            BUSINESS_SEND_LOCKS[business_key] = lock
+    return lock
+
+
 def api(method, payload=None):
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is not set")
@@ -419,29 +438,36 @@ def api(method, payload=None):
     business_chat_id = payload.get("chat_id")
     business_key = (str(business_connection_id), int(business_chat_id)) if business_connection_id and business_chat_id is not None else None
 
-    # No artificial global send lock: independent chats can receive offers
-    # immediately. Telegram's explicit 429 retry_after is still respected.
-    with nullcontext():
-        if method in ("sendMessage", "sendPhoto"):
-            if business_key:
-                # Persisted wall-clock cooldown survives Render restarts.
-                remaining = business_pause_remaining(business_connection_id, business_chat_id)
-                if remaining > 0:
+    # A per-chat lock prevents the webhook and retry workers from sending
+    # simultaneous messages into the same Business conversation.
+    with business_send_context(method, business_key):
+        if method in ("sendMessage", "sendPhoto") and business_key:
+            # Persisted wall-clock cooldown survives Render restarts.
+            remaining = business_pause_remaining(business_connection_id, business_chat_id)
+            if remaining > 0:
+                raise RuntimeError(
+                    f"Business chat is in PEER_FLOOD cooldown for {remaining}s; "
+                    "message remains queued for retry."
+                )
+            with PAUSED_BUSINESS_CHATS_LOCK:
+                paused_until = PAUSED_BUSINESS_CHATS.get(business_key, 0)
+                now = time.monotonic()
+                if paused_until > now:
+                    remaining = int(paused_until - now)
                     raise RuntimeError(
                         f"Business chat is in PEER_FLOOD cooldown for {remaining}s; "
                         "message remains queued for retry."
                     )
-                with PAUSED_BUSINESS_CHATS_LOCK:
-                    paused_until = PAUSED_BUSINESS_CHATS.get(business_key, 0)
-                    now = time.monotonic()
-                    if paused_until > now:
-                        remaining = int(paused_until - now)
-                        raise RuntimeError(
-                            f"Business chat is in PEER_FLOOD cooldown for {remaining}s; "
-                            "message remains queued for retry."
-                        )
-                    if paused_until:
-                        PAUSED_BUSINESS_CHATS.pop(business_key, None)
+                if paused_until:
+                    PAUSED_BUSINESS_CHATS.pop(business_key, None)
+
+            # Apply Telegram's per-chat sending guidance to all Business
+            # messages, including messages coming from background queues.
+            last_sent = BUSINESS_LAST_SEND_AT.get(business_key)
+            if last_sent is not None:
+                wait_seconds = BUSINESS_SEND_INTERVAL_SECONDS - (time.monotonic() - last_sent)
+                if wait_seconds > 0:
+                    time.sleep(wait_seconds)
         try:
             body = json.dumps(payload).encode("utf-8")
             for attempt in range(6):
@@ -508,6 +534,8 @@ def api(method, payload=None):
                         time.sleep(wait_seconds)
                         continue
                     raise RuntimeError(f"Telegram API error: {data}")
+                if method in ("sendMessage", "sendPhoto") and business_key:
+                    BUSINESS_LAST_SEND_AT[business_key] = time.monotonic()
                 return data.get("result")
             raise RuntimeError(f"Telegram API rate limit persisted for {method} after 6 attempts")
         except Exception:
@@ -571,6 +599,10 @@ def retry_business_message_queue():
                 ).fetchall()
             for row in rows:
                 key = (str(row["connection_id"]), int(row["chat_id"]))
+                # Check the database pause too, so queued replies stay idle
+                # across Render restarts and during a persisted PEER_FLOOD cooldown.
+                if business_pause_remaining(row["connection_id"], row["chat_id"]) > 0:
+                    continue
                 with PAUSED_BUSINESS_CHATS_LOCK:
                     if PAUSED_BUSINESS_CHATS.get(key, 0) > time.monotonic():
                         continue
@@ -899,6 +931,10 @@ def retry_queued_offers():
             for offer in rows:
                 connection_id, chat_id = offer["connection_id"], offer["chat_id"]
                 key = (str(connection_id), int(chat_id))
+                # Respect the persisted cooldown before formatting or attempting
+                # queued work; do not wake up every 15 seconds just to fail locally.
+                if business_pause_remaining(connection_id, chat_id) > 0:
+                    continue
                 with PAUSED_BUSINESS_CHATS_LOCK:
                     if PAUSED_BUSINESS_CHATS.get(key, 0) > time.monotonic():
                         continue
