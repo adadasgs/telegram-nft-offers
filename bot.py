@@ -31,8 +31,7 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", hashlib.sha256(BOT_TOKEN.encode("ut
 PUBLIC_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 API_LOCK = threading.RLock()
-# Keep Telegram's own PEER_FLOOD protection, but do not add artificial
-# application-side delays between normal offer deliveries.
+# Respect Telegram's sending limits and pause Business delivery after PEER_FLOOD.
 PAUSED_BUSINESS_CHATS = {}
 PAUSED_BUSINESS_CHATS_LOCK = threading.Lock()
 # PEER_FLOOD means Telegram has spam-reported the sending account.
