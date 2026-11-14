@@ -120,7 +120,7 @@ TEXTS = {
         "buyer_decline": "Вы отклонили предложение.",
         "expired": "Это предложение уже обработано.",
         "bad": "Формат не распознан.\nОтправьте одной строкой:\nhttps://t.me/nft/НазваниеПодарка-12345 2300 ru\n\nПоследний параметр: ru, en или zh.",
-        "help": "Бот работает в подключённых чатах Telegram Business. Отправьте в чате с продавцом одну строку:\n<code>https://t.me/nft/SnoopCigar-84846 2300 ru</code>\n\nСначала подключите бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты и разрешите ему получать и отправлять сообщения."
+        "help": "Бот работает в подключённых чатах Telegram Business. Отправьте в чате с продавцом одну строку:\n<code>SnoopCigar-84846 2300 ru</code>\n\nСначала подключите бота в Telegram → Настройки → Telegram для бизнеса → Чат-боты и разрешите ему получать и отправлять сообщения."
     },
     "en": {
         "offer": "👤 <b>{buyer_name}</b> offers to buy your NFT gift:\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>Offer:</b> {amount_display} <b>({usd_display})</b>\n⏳ <b>Offer valid for:</b> {expires_display}\n\n<i>Choose an action below.</i>",
@@ -140,8 +140,8 @@ Open the <a href="{transfer_url}"><b>manager's profile</b></a>, tap <b>Transfer 
         "buyer_accept": "You accepted the offer. Transfer the gift only after independently checking the terms and payment. This bot does not hold or automatically transfer Stars.",
         "buyer_decline": "You declined the offer.",
         "expired": "This offer has already been processed.",
-        "bad": "I couldn't parse that line.\nSend one line in this format:\nhttps://t.me/nft/SnoopCigar-84846 2300 en\n\nLanguage: ru, en, or zh.",
-        "help": "Use this bot in a connected Telegram Business chat. Send one line in the seller's chat:\n<code>https://t.me/nft/SnoopCigar-84846 2300 en</code>\n\nConnect the bot in Telegram → Settings → Telegram Business → Chatbots and grant permission to receive and send messages."
+        "bad": "I couldn't parse that line.\nSend one line in this format:\nSnoopCigar-84846 2300 en\n\nLanguage: ru, en, or zh.",
+        "help": "Use this bot in a connected Telegram Business chat. Send one line in the seller's chat:\n<code>SnoopCigar-84846 2300 en</code>\n\nConnect the bot in Telegram → Settings → Telegram Business → Chatbots and grant permission to receive and send messages."
     },
     "zh": {
         "offer": "👤 <b>{buyer_name}</b> 想购买您的 NFT 礼物：\n<a href=\"{url}\">{gift}</a>\n\n💰 <b>报价：</b>{amount_display} <b>({usd_display})</b>\n⏳ <b>有效期：</b>{expires_display}\n\n<i>请选择下方操作。</i>",
@@ -161,8 +161,8 @@ Open the <a href="{transfer_url}"><b>manager's profile</b></a>, tap <b>Transfer 
         "buyer_accept": "您已接受报价。请先自行核实交易条件和付款，再转移礼物。本机器人不会托管或自动转账 Stars。",
         "buyer_decline": "您已拒绝报价。",
         "expired": "此报价已处理。",
-        "bad": "无法识别格式。\n请发送一行，格式如下：\nhttps://t.me/nft/SnoopCigar-84846 2300 zh\n\n语言：ru、en 或 zh。",
-        "help": "请在已连接的 Telegram Business 聊天中使用。向卖家发送一行：\n<code>https://t.me/nft/SnoopCigar-84846 2300 zh</code>\n\n在 Telegram → 设置 → Telegram Business → 聊天机器人中连接本机器人，并授予接收和发送消息的权限。"
+        "bad": "无法识别格式。\n请发送一行，格式如下：\nSnoopCigar-84846 2300 zh\n\n语言：ru、en 或 zh。",
+        "help": "请在已连接的 Telegram Business 聊天中使用。向卖家发送一行：\n<code>SnoopCigar-84846 2300 zh</code>\n\n在 Telegram → 设置 → Telegram Business → 聊天机器人中连接本机器人，并授予接收和发送消息的权限。"
     }
 }
 
@@ -657,6 +657,10 @@ def delete_source_messages(connection_id, chat_id, message_ids):
 
 def normalize_nft_url(value):
     value = (value or "").strip()
+    # Accept either a full Telegram NFT link or its copied slug, e.g.
+    # CandyCane-133352. Store the canonical URL internally for previews.
+    if re.fullmatch(r"[A-Za-z0-9_-]+-[0-9]+", value):
+        return "https://t.me/nft/" + value
     if value.startswith("t.me/") or value.startswith("www.t.me/"):
         value = "https://" + value
     parsed = urlparse(value)
@@ -995,7 +999,7 @@ def handle_business_message(message):
                     log.exception("Could not send offer failure notice to business chat %s", chat_id)
         return
 
-    # New step-by-step syntax: URL -> amount -> language.
+    # New step-by-step syntax: gift slug or URL -> amount -> language.
     gift = parse_gift_url(text)
     if gift:
         gift_url, gift_name = gift
@@ -1011,7 +1015,7 @@ def handle_business_message(message):
             """, (key, connection_id, chat_id, gift_url, gift_name,
                   int(time.time()), json.dumps([message.get("message_id")])))
             conn.commit()
-        send_business_reply(chat_id, "Ссылка на NFT получена. Теперь отправь сумму в Stars отдельным сообщением, например: 2300", connection_id)
+        send_business_reply(chat_id, "Подарок получен. Теперь отправь сумму в Stars отдельным сообщением, например: 2300", connection_id)
         return
 
     with db() as conn:
@@ -1019,7 +1023,7 @@ def handle_business_message(message):
 
     if not draft:
         if "t.me/nft/" in text:
-            send_business_reply(chat_id, "Не удалось распознать ссылку. Отправь прямую ссылку вида https://t.me/nft/SnoopCigar-84846", connection_id)
+            send_business_reply(chat_id, "Не удалось распознать ссылку. Отправь прямую ссылку вида SnoopCigar-84846", connection_id)
         return
 
     if draft["stage"] == "amount":
