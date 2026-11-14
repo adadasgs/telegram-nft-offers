@@ -35,7 +35,9 @@ API_LOCK = threading.RLock()
 # application-side delays between normal offer deliveries.
 PAUSED_BUSINESS_CHATS = {}
 PAUSED_BUSINESS_CHATS_LOCK = threading.Lock()
-BUSINESS_PEER_FLOOD_COOLDOWN = 10 * 60
+# PEER_FLOOD means Telegram has spam-reported the sending account.
+# Keep Business sends paused until an admin checks @SpamBot and explicitly resumes.
+BUSINESS_PEER_FLOOD_COOLDOWN = 365 * 24 * 60 * 60
 
 SEEN_UPDATES = set()
 SEEN_UPDATES_LOCK = threading.Lock()
@@ -404,7 +406,7 @@ def business_pause_remaining(connection_id, chat_id):
 
 
 def record_business_pause(connection_id, chat_id):
-    """Persist a conservative cooldown so a Render restart cannot erase it."""
+    """Persist a manual-release hold after Telegram reports PEER_FLOOD."""
     paused_until = int(time.time()) + BUSINESS_PEER_FLOOD_COOLDOWN
     with db() as conn:
         conn.execute(
@@ -414,8 +416,25 @@ def record_business_pause(connection_id, chat_id):
                paused_until=excluded.paused_until""",
             (str(connection_id), int(chat_id), paused_until)
         )
+        # Do not release a backlog of stale prompts after an account-level
+        # spam restriction. Pending offer records remain in the offers table.
+        conn.execute(
+            "DELETE FROM business_message_queue WHERE connection_id=? AND chat_id=?",
+            (str(connection_id), int(chat_id))
+        )
         conn.commit()
     return paused_until
+
+
+def clear_business_pauses():
+    """Admin-only release after the connected account is cleared by Telegram."""
+    with db() as conn:
+        result = conn.execute("DELETE FROM business_chat_cooldowns")
+        cleared = max(0, int(result.rowcount or 0))
+        conn.commit()
+    with PAUSED_BUSINESS_CHATS_LOCK:
+        PAUSED_BUSINESS_CHATS.clear()
+    return cleared
 
 
 def business_send_context(method, business_key):
@@ -584,6 +603,12 @@ def send_business_reply(chat_id, text, connection_id):
         reason = str(exc).upper()
         if "PEER_FLOOD" not in reason and "COOLDOWN" not in reason:
             raise
+        if business_pause_remaining(connection_id, chat_id) > 0:
+            log.warning(
+                "BUSINESS_REPLY_SKIPPED_DURING_SPAM_HOLD connection_id=%s chat_id=%s",
+                connection_id, chat_id
+            )
+            return None
         queue_business_reply(chat_id, text, connection_id)
         return None
 
@@ -1384,6 +1409,18 @@ def handle_private_message(message):
             "выдайте разрешения и отправляйте оффер из нужного личного Business-чата.\n\n"
             "Формат: <code>https://t.me/nft/НазваниеПодарка-12345 2300 ru</code>\n"
             "Язык в конце: ru, en или zh."
+        )
+        return
+    if command == "/resume_business":
+        if user_id not in ADMIN_IDS:
+            if user_id:
+                send_message(user_id, "⛔ Нет доступа к этой команде.")
+            return
+        cleared = clear_business_pauses()
+        send_message(
+            user_id,
+            f"✅ Снято Business-пауз: {cleared}. Очередь снова может отправлять сообщения. "
+            "Используйте эту команду только после того, как @SpamBot подтвердит снятие ограничения."
         )
         return
     if command == "/malik":
