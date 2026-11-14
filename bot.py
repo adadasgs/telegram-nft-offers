@@ -212,6 +212,12 @@ def db():
         raw = psycopg.connect(database_url, row_factory=dict_row, connect_timeout=15)
         conn = PostgresConnection(raw)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS processed_updates (
+                update_id BIGINT PRIMARY KEY,
+                received_at BIGINT NOT NULL
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS offers (
                 id TEXT PRIMARY KEY,
                 connection_id TEXT NOT NULL,
@@ -289,6 +295,12 @@ def db():
         os.makedirs(folder, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=20)
     conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS processed_updates (
+            update_id INTEGER PRIMARY KEY,
+            received_at INTEGER NOT NULL
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS offers (
             id TEXT PRIMARY KEY,
@@ -1643,16 +1655,25 @@ class HealthHandler(BaseHTTPRequestHandler):
             update_type = next((key for key in ("callback_query", "business_message", "message", "business_connection") if key in update), "unknown")
             log.info("Webhook update received: type=%s update_id=%s", update_type, update_id)
             if update_id is not None:
-                with SEEN_UPDATES_LOCK:
-                    if update_id in SEEN_UPDATES:
-                        self.send_response(200)
-                        self.end_headers()
-                        self.wfile.write(b"OK")
-                        return
-                    SEEN_UPDATES.add(update_id)
-                    if len(SEEN_UPDATES) > 10000:
-                        SEEN_UPDATES.clear()
-                        SEEN_UPDATES.add(update_id)
+                # Persist Telegram update IDs so webhook retries after a Render
+                # restart (or a second app instance) cannot create duplicate offers.
+                with db() as conn:
+                    inserted = conn.execute(
+                        """INSERT INTO processed_updates (update_id, received_at)
+                           VALUES (?, ?) ON CONFLICT(update_id) DO NOTHING""",
+                        (int(update_id), int(time.time()))
+                    )
+                    is_new_update = inserted.rowcount == 1
+                    conn.execute(
+                        "DELETE FROM processed_updates WHERE received_at < ?",
+                        (int(time.time()) - 30 * 24 * 60 * 60,)
+                    )
+                if not is_new_update:
+                    log.info("Duplicate Telegram update ignored permanently: update_id=%s", update_id)
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b"OK")
+                    return
             # Queue updates in arrival order. One worker processes them sequentially,
             # preventing URL/amount/language messages from racing in separate threads.
             UPDATE_QUEUE.put(update)
