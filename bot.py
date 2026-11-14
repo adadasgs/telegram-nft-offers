@@ -1127,7 +1127,16 @@ def notify_admin(text, reply_markup=None):
     for admin_id in ADMIN_IDS:
         try:
             send_message(admin_id, text, reply_markup=reply_markup)
-        except Exception:
+        except Exception as exc:
+            # A bot cannot start a private chat until that user opens it.
+            # Keep the notification in admin_notifications without flooding logs.
+            if "chat not found" in str(exc).lower():
+                log.warning(
+                    "ADMIN_NOTIFICATION_SKIPPED: chat not found for admin_id=%s; "
+                    "admin must open the bot and press /start",
+                    admin_id
+                )
+                continue
             log.exception("Could not notify admin %s", admin_id)
 
 def malik_keyboard():
